@@ -122,12 +122,18 @@ def provider_webdownloader(url: str) -> dict:
     r.raise_for_status()
     data = r.json()
 
+    def unwrap(payload: dict) -> dict:
+        nested = payload.get("data")
+        return nested if isinstance(nested, dict) else payload
+
     def get_download_link(payload: dict) -> Optional[str]:
+        payload = unwrap(payload)
         return (
             payload.get("downloadUrl") or payload.get("download_url")
             or payload.get("url") or payload.get("fileUrl")
         )
 
+    data = unwrap(data)
     download_url = get_download_link(data)
     status_url = data.get("statusUrl") or data.get("status_url")
     if not download_url and status_url:
@@ -142,13 +148,17 @@ def provider_webdownloader(url: str) -> dict:
             status_response = HTTP.get(status_url, timeout=(8, 20))
             status_response.raise_for_status()
             state = status_response.json()
+            state = unwrap(state)
             download_url = get_download_link(state)
             status = str(state.get("status", "")).lower()
-            if status == "completed" and download_url:
+            if status in ("completed", "complete", "success") and download_url:
                 data = state
                 break
             if status in ("failed", "error", "cancelled"):
-                raise RuntimeError(state.get("error") or state.get("message") or "WebDownloader xử lý thất bại.")
+                error = state.get("error") or state.get("message") or "WebDownloader xử lý thất bại."
+                if isinstance(error, dict):
+                    error = error.get("message") or str(error)
+                raise RuntimeError(error)
             if status not in ("", "pending", "processing", "downloading", "converting", "completed"):
                 raise RuntimeError(f"Trạng thái WebDownloader không nhận diện: {status}")
         else:
@@ -255,6 +265,16 @@ def health():
         "status": "healthy",
         "version": app.version,
         "gemini_configured": bool(GEMINI_API_KEY),
+        "openrouter_configured": bool(OPENROUTER_API_KEY),
+        "groq_configured": bool(GROQ_API_KEY),
+        "ai_ready": bool(GEMINI_API_KEY or OPENROUTER_API_KEY or GROQ_API_KEY),
+        "ai_providers": [
+            name for name, configured in (
+                ("Gemini", GEMINI_API_KEY),
+                ("OpenRouter", OPENROUTER_API_KEY),
+                ("Groq", GROQ_API_KEY),
+            ) if configured
+        ],
         "download_providers": ["GenDownload", "WebDownloader", "TikTok Downloader Worker (TikTok only)", "yt-dlp"],
     }
 
