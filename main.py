@@ -10,7 +10,7 @@ from google.genai import types
 
 app = FastAPI()
 
-# Mở quyền truy cập cho mọi ứng dụng Android gọi vào
+# Mở quyền truy cập cho mọi ứng dụng Android (Poco) và Web gọi vào
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,7 +28,7 @@ class ChatRequest(BaseModel):
 def download_video_no_watermark(url: str) -> dict:
     """Công cụ tải video không logo từ link TikTok, Douyin, Facebook, Instagram, Threads..."""
     
-    # Làm sạch đường link (phòng trường hợp người dùng copy cả đoạn chữ kèm link từ TikTok/Douyin)
+    # Làm sạch đường link (tách link ra khỏi đoạn văn bản mô tả khi sao chép từ TikTok/Douyin)
     url_match = re.search(r'(https?://[^\s]+)', url)
     clean_url = url_match.group(1) if url_match else url.strip()
 
@@ -43,7 +43,7 @@ def download_video_no_watermark(url: str) -> dict:
         if data.get("code") == 0 and data.get("data", {}).get("play"):
             return {
                 "status": "success",
-                "source": "Server 1",
+                "source": "Server 1 (TikWM)",
                 "video_url": data["data"]["play"],
                 "cover": data["data"].get("cover", ""),
                 "title": data["data"].get("title", "Video không logo")
@@ -65,7 +65,7 @@ def download_video_no_watermark(url: str) -> dict:
             if video_link:
                 return {
                     "status": "success",
-                    "source": "Server 2",
+                    "source": "Server 2 (GenDownload)",
                     "video_url": video_link,
                     "cover": data.get("thumbnail", ""),
                     "title": data.get("title", "Video không logo")
@@ -89,7 +89,7 @@ def download_video_no_watermark(url: str) -> dict:
             if info and info.get('url'):
                 return {
                     "status": "success",
-                    "source": "Server 3",
+                    "source": "Server 3 (yt-dlp)",
                     "video_url": info['url'],
                     "cover": info.get('thumbnail', ''),
                     "title": info.get('title', 'Video đã xử lý')
@@ -102,19 +102,18 @@ def download_video_no_watermark(url: str) -> dict:
         "message": "Hiện tại cả 3 máy chủ tải video đều đang quá tải hoặc link video ở chế độ riêng tư. Bạn vui lòng thử lại sau ít phút nhé!"
     }
 
-# --- CỔNG XỬ LÝ TIN NHẮN CHÍNH TỪ APP ANDROID ---
+# --- CỔNG XỬ LÝ TIN NHẮN CHÍNH TỪ APP POCO ---
 @app.post("/chat")
 def chat_endpoint(req: ChatRequest):
     user_msg = req.message.strip()
     if not user_msg:
         return {"type": "text", "message": "Bạn hãy nhập câu hỏi hoặc dán link video cần tải nhé!"}
 
-    # Cấu hình vai trò của AI (Bạn có thể sửa nội dung giới thiệu tính năng App tại đây)
     system_prompt = """
-    Bạn là Trợ lý AI thông minh tích hợp trong ứng dụng.
+    Bạn là Trợ lý AI chính thức tích hợp trong ứng dụng Poco.
     Bạn có 2 nhiệm vụ chính:
-    1. Hướng dẫn sử dụng & giải đáp thắc mắc: Hỗ trợ người dùng tận tình, ngắn gọn, dễ hiểu bằng tiếng Việt về cách dùng các tính năng trong ứng dụng (tải video không logo, quản lý file đã tải, chia sẻ...).
-    2. Tải video không logo: Bất cứ khi nào tin nhắn của người dùng có chứa đường link video (http:// hoặc https://) từ TikTok, Douyin, Facebook, Instagram, Threads, YouTube... BẮT BUỘC phải gọi ngay công cụ `download_video_no_watermark` để tải video cho họ, không cần hỏi lại.
+    1. Hướng dẫn sử dụng & giải đáp thắc mắc: Hỗ trợ người dùng tận tình, ngắn gọn, dễ hiểu bằng tiếng Việt về cách dùng các tính năng trong ứng dụng Poco (tải video không logo, quản lý file đã tải, chia sẻ...).
+    2. Tải video không logo: Bất cứ khi nào tin nhắn của người dùng có chứa đường link video (http:// hoặc https://) từ TikTok, Douyin, Facebook, Instagram, Threads, YouTube... BẮT BUỘC phải gọi ngay công cụ `download_video_no_watermark` để lấy video không logo cho họ, không cần hỏi lại.
     """
 
     try:
@@ -129,8 +128,8 @@ def chat_endpoint(req: ChatRequest):
         )
 
         # Kiểm tra kết quả trả về từ công cụ tải video
-        if response.candidates and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
+        if response.candidates and response.candidates.content.parts:
+            for part in response.candidates.content.parts:
                 if part.function_response:
                     result = part.function_response.response
                     if result.get("status") == "success":
@@ -162,8 +161,8 @@ def chat_endpoint(req: ChatRequest):
             "message": "Trợ lý AI đang xử lý hơi chậm một chút, bạn vui lòng gửi lại nhé!"
         }
 
-# Endpoint kiểm tra trạng thái server (dùng cho UptimeRobot)
-@app.get("/")
+# Cổng kiểm tra trạng thái server (Hỗ trợ cả GET và HEAD để UptimeRobot luôn báo xanh lá 24/24)
+@app.api_route("/", methods=["GET", "HEAD"])
 def health_check():
     return {"status": "online", "message": "AI & Video Downloader Server is running"}
-                    
+    
