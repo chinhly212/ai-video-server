@@ -9,7 +9,7 @@ from typing import Optional
 
 import requests
 import yt_dlp
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
@@ -294,6 +294,51 @@ def providers():
         "note": "Public free services may impose limits or change availability without notice."
     }
 
+@app.post("/api/validate")
+def validate_api_endpoint(
+    req: dict,
+    api_key: str = Header(default="", alias="X-Provider-Api-Key"),
+):
+    provider = str(req.get("provider", "")).strip().lower()
+    if provider not in ("gemini", "openrouter", "groq"):
+        raise HTTPException(status_code=400, detail="Nhà cung cấp chưa được hỗ trợ.")
+    if not api_key.strip():
+        raise HTTPException(status_code=400, detail="API key đang trống.")
+    try:
+        if provider == "gemini":
+            response = HTTP.get(
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                headers={"x-goog-api-key": api_key.strip()},
+                params={"pageSize": 1},
+                timeout=(8, 20),
+            )
+        elif provider == "openrouter":
+            response = HTTP.get(
+                "https://openrouter.ai/api/v1/models",
+                headers={"Authorization": f"Bearer {api_key.strip()}"},
+                timeout=(8, 20),
+            )
+        else:
+            response = HTTP.get(
+                "https://api.groq.com/openai/v1/models",
+                headers={"Authorization": f"Bearer {api_key.strip()}"},
+                timeout=(8, 20),
+            )
+        if response.status_code in (401, 403):
+            raise HTTPException(status_code=401, detail="API key không hợp lệ hoặc không có quyền truy cập.")
+        if response.status_code == 429:
+            raise HTTPException(status_code=429, detail="Nhà cung cấp đang giới hạn lượt gọi hoặc đã hết hạn mức.")
+        if response.status_code >= 500:
+            raise HTTPException(status_code=502, detail=f"Máy chủ {provider} đang gặp sự cố (HTTP {response.status_code}).")
+        response.raise_for_status()
+        return {"valid": True, "provider": provider, "message": f"Kết nối {provider} thành công."}
+    except HTTPException:
+        raise
+    except requests.Timeout:
+        raise HTTPException(status_code=504, detail="Hết thời gian chờ khi kiểm tra API.")
+    except requests.RequestException:
+        raise HTTPException(status_code=502, detail="Không thể kết nối nhà cung cấp API. Kiểm tra mạng hoặc thử lại.")
+
 @app.post("/download")
 def download_endpoint(req: DownloadRequest):
     result = download_with_failover(req.url)
@@ -302,7 +347,12 @@ def download_endpoint(req: DownloadRequest):
     return result
 
 @app.post("/chat")
-def chat_endpoint(req: ChatRequest):
+def chat_endpoint(
+    req: ChatRequest,
+    gemini_api_key: str = Header(default="", alias="X-Gemini-Api-Key"),
+    openrouter_api_key: str = Header(default="", alias="X-OpenRouter-Api-Key"),
+    groq_api_key: str = Header(default="", alias="X-Groq-Api-Key"),
+):
     message = req.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="Tin nhắn không được để trống.")
@@ -324,12 +374,16 @@ def chat_endpoint(req: ChatRequest):
         "đã được gọi riêng; không tự nhận đã tải nếu chưa có kết quả thành công."
     )
     failures = []
+    request_gemini_key = gemini_api_key.strip() or GEMINI_API_KEY
+    request_openrouter_key = openrouter_api_key.strip() or OPENROUTER_API_KEY
+    request_groq_key = groq_api_key.strip() or GROQ_API_KEY
+    request_gemini_client = genai.Client(api_key=request_gemini_key) if request_gemini_key else None
 
     # Primary model: Gemini. Optional OpenAI-compatible providers are tried
     # automatically when their keys are configured in the hosting environment.
-    if gemini_client:
+    if request_gemini_client:
         try:
-            response = gemini_client.models.generate_content(
+            response = request_gemini_client.models.generate_content(
                 model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
                 contents=message,
                 config=types.GenerateContentConfig(
@@ -348,13 +402,13 @@ def chat_endpoint(req: ChatRequest):
     compatible_providers = [
         (
             "OpenRouter",
-            OPENROUTER_API_KEY,
+            request_openrouter_key,
             "https://openrouter.ai/api/v1/chat/completions",
             os.getenv("OPENROUTER_MODEL", "openrouter/free"),
         ),
         (
             "Groq",
-            GROQ_API_KEY,
+            request_groq_key,
             "https://api.groq.com/openai/v1/chat/completions",
             os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
         ),
@@ -390,7 +444,7 @@ def chat_endpoint(req: ChatRequest):
             log.warning("%s failed: %s", provider_name, str(exc)[:240])
             failures.append(f"{provider_name}: {str(exc)[:180]}")
 
-    if not (GEMINI_API_KEY or OPENROUTER_API_KEY or GROQ_API_KEY):
+    if not (request_gemini_key or request_openrouter_key or request_groq_key):
         message_text = (
             "Chưa cấu hình API mô hình AI. Chủ máy chủ cần thêm ít nhất một khóa "
             "GEMINI_API_KEY, OPENROUTER_API_KEY hoặc GROQ_API_KEY trong biến môi trường Render. "
