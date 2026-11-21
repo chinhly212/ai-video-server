@@ -3,6 +3,7 @@ import re
 import ipaddress
 import socket
 import logging
+import time
 from urllib.parse import urlparse
 from typing import Optional
 
@@ -108,24 +109,43 @@ def provider_gendownload(url: str) -> dict:
     }
 
 def provider_webdownloader(url: str) -> dict:
-    # Public API, no API key. The JSON-mode endpoint returns a temporary signed URL.
+    # Public API without API key. Supports queued jobs and temporary signed URLs.
+    base = "https://save.brianrianrehan.com"
     r = HTTP.post(
-        "https://save.brianrianrehan.com/api/v1/download",
+        base + "/api/v1/download",
         params={"wait": "false", "download": "false"},
         json={"url": url, "format": "video", "quality": "best", "outputFormat": "mp4"},
         timeout=(8, 45),
     )
     r.raise_for_status()
     data = r.json()
-    download_url = (
-        data.get("downloadUrl") or data.get("download_url")
-        or data.get("url") or data.get("fileUrl")
-    )
+
+    def get_download_link(payload: dict) -> Optional[str]:
+        return (
+            payload.get("downloadUrl") or payload.get("download_url")
+            or payload.get("url") or payload.get("fileUrl")
+        )
+
+    download_url = get_download_link(data)
+    status_url = data.get("statusUrl") or data.get("status_url")
+    if not download_url and status_url:
+        if status_url.startswith("/"):
+            status_url = base + status_url
+        deadline = time.monotonic() + 75
+        while time.monotonic() < deadline:
+            time.sleep(3)
+            status_response = HTTP.get(status_url, timeout=(8, 20))
+            status_response.raise_for_status()
+            state = status_response.json()
+            download_url = get_download_link(state)
+            status = str(state.get("status", "")).lower()
+            if download_url and status in ("", "ready", "completed", "complete", "success"):
+                data = state
+                break
+            if status in ("failed", "error", "cancelled"):
+                raise RuntimeError(state.get("error") or state.get("message") or "WebDownloader xử lý thất bại.")
     if not download_url:
-        status_url = data.get("statusUrl") or data.get("status_url")
-        if status_url:
-            raise RuntimeError("WebDownloader đã nhận tác vụ nhưng chưa trả URL tải; cần polling status.")
-        raise RuntimeError("WebDownloader không trả về download URL.")
+        raise RuntimeError("WebDownloader chưa trả URL tải hợp lệ.")
     return {
         "status": "success",
         "provider": "WebDownloader",
