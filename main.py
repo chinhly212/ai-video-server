@@ -324,8 +324,8 @@ def validate_api_endpoint(
                 headers={"Authorization": f"Bearer {api_key.strip()}"},
                 timeout=(8, 20),
             )
-        if response.status_code in (401, 403):
-            raise HTTPException(status_code=401, detail="API key không hợp lệ hoặc không có quyền truy cập.")
+        if response.status_code in (400, 401, 403):
+            raise HTTPException(status_code=401, detail="API key không hợp lệ hoặc yêu cầu không được nhà cung cấp chấp nhận.")
         if response.status_code == 429:
             raise HTTPException(status_code=429, detail="Nhà cung cấp đang giới hạn lượt gọi hoặc đã hết hạn mức.")
         if response.status_code >= 500:
