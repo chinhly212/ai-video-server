@@ -131,6 +131,9 @@ def provider_webdownloader(url: str) -> dict:
     if not download_url and status_url:
         if status_url.startswith("/"):
             status_url = base + status_url
+        parsed_status = urlparse(status_url)
+        if parsed_status.scheme != "https" or parsed_status.hostname != "save.brianrianrehan.com":
+            raise RuntimeError("WebDownloader trả statusUrl không hợp lệ.")
         deadline = time.monotonic() + 75
         while time.monotonic() < deadline:
             time.sleep(3)
@@ -139,13 +142,20 @@ def provider_webdownloader(url: str) -> dict:
             state = status_response.json()
             download_url = get_download_link(state)
             status = str(state.get("status", "")).lower()
-            if download_url and status in ("", "ready", "completed", "complete", "success"):
+            if status == "completed" and download_url:
                 data = state
                 break
             if status in ("failed", "error", "cancelled"):
                 raise RuntimeError(state.get("error") or state.get("message") or "WebDownloader xử lý thất bại.")
+            if status not in ("", "pending", "processing", "downloading", "converting", "completed"):
+                raise RuntimeError(f"Trạng thái WebDownloader không nhận diện: {status}")
+        else:
+            raise RuntimeError("WebDownloader quá thời gian chờ xử lý.")
     if not download_url:
         raise RuntimeError("WebDownloader chưa trả URL tải hợp lệ.")
+    parsed_download = urlparse(download_url)
+    if parsed_download.scheme not in ("http", "https") or not parsed_download.hostname:
+        raise RuntimeError("WebDownloader trả URL tải không hợp lệ.")
     return {
         "status": "success",
         "provider": "WebDownloader",
