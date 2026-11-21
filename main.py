@@ -1,17 +1,24 @@
 import os
 import re
+import ipaddress
+import socket
+import logging
+from urllib.parse import urlparse
+from typing import Optional
+
 import requests
 import yt_dlp
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
 
-app = FastAPI()
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("ai-video-server")
 
-# Mở quyền truy cập cho mọi ứng dụng Android (Poco) và Web gọi vào
+app = FastAPI(title="AI Video Server", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,193 +26,284 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Khởi tạo Gemini AI từ biến môi trường GEMINI_API_KEY
-client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+HTTP = requests.Session()
+HTTP.headers.update({"User-Agent": "Mozilla/5.0 (compatible; AIVideoServer/0.2)"})
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(min_length=1, max_length=8000)
 
-# --- BỘ TẢI VIDEO KHÔNG LOGO 3 NGUỒN (TỰ ĐỘNG CHUYỂN ĐỔI KHI QUÁ TẢI) ---
-def download_video_no_watermark(url: str) -> dict:
-    """Công cụ tải video không logo từ link TikTok, Douyin, Facebook, Instagram, Threads..."""
-    
-    url_match = re.search(r'(https?://[^\s]+)', url)
-    clean_url = url_match.group(1) if url_match else url.strip()
+class DownloadRequest(BaseModel):
+    url: str = Field(min_length=8, max_length=4096)
 
-    # NGUỒN 1: TikWM API (Chuẩn endpoint /api/?url=)
+ALLOWED_HOST_SUFFIXES = (
+    "tiktok.com", "tiktokv.com", "tiktokcdn.com", "douyin.com",
+    "iesdouyin.com", "kuaishou.com", "gifshow.com", "youtube.com",
+    "youtu.be", "googlevideo.com", "instagram.com", "cdninstagram.com",
+    "facebook.com", "fb.watch", "fbcdn.net", "threads.net", "x.com",
+    "twitter.com", "redd.it", "reddit.com", "bilibili.com", "b23.tv",
+)
+
+def validate_video_url(raw_url: str) -> str:
+    value = raw_url.strip()
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise HTTPException(status_code=400, detail="URL phải bắt đầu bằng http:// hoặc https://")
+    host = parsed.hostname.lower().rstrip(".")
+    if not any(host == d or host.endswith("." + d) for d in ALLOWED_HOST_SUFFIXES):
+        raise HTTPException(status_code=400, detail="Tên miền này chưa nằm trong danh sách nền tảng hỗ trợ.")
     try:
-        res = requests.get(
-            f"https://tikwm.com{clean_url}",
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=6
-        )
-        data = res.json()
-        if data.get("code") == 0 and data.get("data", {}).get("play"):
-            return {
-                "status": "success",
-                "source": "Server 1 (TikWM)",
-                "video_url": data["data"]["play"],
-                "cover": data["data"].get("cover", ""),
-                "title": data["data"].get("title", "Video không logo")
-            }
-    except Exception as e:
-        print(f"[Nguồn 1 bận]: {e}")
+        infos = socket.getaddrinfo(host, None)
+        for info in infos:
+            ip = ipaddress.ip_address(info[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                raise HTTPException(status_code=400, detail="Địa chỉ máy chủ không được phép.")
+    except socket.gaierror:
+        pass
+    return value
 
-    # NGUỒN 2: GenDownload API (Chuẩn endpoint /v1/download)
-    try:
-        res = requests.post(
-            "https://gendownload.io",
-            json={"url": clean_url},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=6
-        )
-        if res.status_code == 200:
-            data = res.json()
-            video_link = data.get("video_url") or data.get("url") or data.get("no_watermark")
-            if video_link:
-                return {
-                    "status": "success",
-                    "source": "Server 2 (GenDownload)",
-                    "video_url": video_link,
-                    "cover": data.get("thumbnail", ""),
-                    "title": data.get("title", "Video không logo")
-                }
-    except Exception as e:
-        print(f"[Nguồn 2 bận]: {e}")
+def extract_video_id_url(text: str) -> Optional[str]:
+    match = re.search(r"https?://[^\s<>\\"']+", text)
+    return match.group(0).rstrip(".,);]") if match else None
 
-    # NGUỒN 3: Engine mã nguồn mở yt-dlp chạy trực tiếp trên Server Render
-    try:
-        ydl_opts = {
-            'format': 'best[ext=mp4]/best',
-            'quiet': True,
-            'no_warnings': True,
-            'nocheckcertificate': True,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(clean_url, download=False)
-            if info and info.get('url'):
-                return {
-                    "status": "success",
-                    "source": "Server 3 (yt-dlp)",
-                    "video_url": info['url'],
-                    "cover": info.get('thumbnail', ''),
-                    "title": info.get('title', 'Video đã xử lý')
-                }
-    except Exception as e:
-        print(f"[Nguồn 3 lỗi]: {e}")
+def choose_gen_download_format(data: dict) -> Optional[dict]:
+    formats = data.get("formats") or []
+    videos = [
+        item for item in formats
+        if isinstance(item, dict)
+        and item.get("type") == "video"
+        and item.get("url")
+        and item.get("ext", "").lower() in ("mp4", "m4v", "mov")
+    ]
+    if not videos:
+        videos = [x for x in formats if isinstance(x, dict) and x.get("type") == "video" and x.get("url")]
+    if not videos:
+        return None
+    def quality(item):
+        label = str(item.get("label", ""))
+        match = re.search(r"(\d{3,4})", label)
+        return int(match.group(1)) if match else 0
+    return max(videos, key=quality)
 
+def provider_gendownload(url: str) -> dict:
+    r = HTTP.post(
+        "https://gendownload.com/api/extract",
+        json={"url": url},
+        timeout=(8, 35),
+    )
+    r.raise_for_status()
+    data = r.json()
+    fmt = choose_gen_download_format(data)
+    if not fmt:
+        raise RuntimeError("GenDownload không trả về định dạng video.")
     return {
-        "status": "error",
-        "message": "Hiện tại cả 3 máy chủ tải video đều đang quá tải hoặc link video ở chế độ riêng tư. Bạn vui lòng thử lại sau ít phút nhé!"
+        "status": "success",
+        "provider": "GenDownload",
+        "title": data.get("title") or "Video",
+        "thumbnail": data.get("thumbnail") or "",
+        "video_url": fmt["url"],
+        "format": fmt.get("label") or fmt.get("ext") or "video",
+        "source": data.get("source") or "",
     }
 
-# --- CỔNG XỬ LÝ TIN NHẮN CHÍNH TỪ APP POCO ---
+def provider_webdownloader(url: str) -> dict:
+    # Public API, no API key. The JSON-mode endpoint returns a temporary signed URL.
+    r = HTTP.post(
+        "https://save.brianrianrehan.com/api/v1/download",
+        params={"wait": "false", "download": "false"},
+        json={"url": url, "format": "video", "quality": "best", "outputFormat": "mp4"},
+        timeout=(8, 45),
+    )
+    r.raise_for_status()
+    data = r.json()
+    download_url = (
+        data.get("downloadUrl") or data.get("download_url")
+        or data.get("url") or data.get("fileUrl")
+    )
+    if not download_url:
+        status_url = data.get("statusUrl") or data.get("status_url")
+        if status_url:
+            raise RuntimeError("WebDownloader đã nhận tác vụ nhưng chưa trả URL tải; cần polling status.")
+        raise RuntimeError("WebDownloader không trả về download URL.")
+    return {
+        "status": "success",
+        "provider": "WebDownloader",
+        "title": data.get("title") or "Video",
+        "thumbnail": data.get("thumbnail") or "",
+        "video_url": download_url,
+        "format": "mp4",
+        "source": data.get("platform") or "",
+    }
+
+def provider_tiktok_worker(url: str) -> dict:
+    host = urlparse(url).hostname or ""
+    if not (host == "tiktok.com" or host.endswith(".tiktok.com") or host in ("vt.tiktok.com", "vm.tiktok.com")):
+        raise RuntimeError("API dự phòng thứ ba chỉ hỗ trợ TikTok.")
+    r = HTTP.get(
+        "https://tdownv4.sl-bjs.workers.dev/",
+        params={"down": url},
+        timeout=(8, 35),
+    )
+    r.raise_for_status()
+    data = r.json()
+    video_url = data.get("download_url") or data.get("video_url")
+    if not video_url:
+        raise RuntimeError("TikTok Worker không trả về download_url.")
+    return {
+        "status": "success",
+        "provider": "TikTok Downloader Worker",
+        "title": data.get("title") or "TikTok video",
+        "thumbnail": data.get("cover") or data.get("thumbnail") or "",
+        "video_url": video_url,
+        "format": "mp4",
+        "source": "TikTok",
+    }
+
+def provider_ytdlp(url: str) -> dict:
+    options = {
+        "format": "best[ext=mp4]/best",
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "socket_timeout": 25,
+        "retries": 1,
+        "extractor_retries": 1,
+    }
+    with yt_dlp.YoutubeDL(options) as ydl:
+        info = ydl.extract_info(url, download=False)
+    if not info:
+        raise RuntimeError("yt-dlp không lấy được thông tin video.")
+    video_url = info.get("url")
+    if not video_url and info.get("requested_formats"):
+        video_url = info["requested_formats"][0].get("url")
+    if not video_url:
+        raise RuntimeError("yt-dlp không tìm thấy luồng video.")
+    return {
+        "status": "success",
+        "provider": "yt-dlp (server)",
+        "title": info.get("title") or "Video",
+        "thumbnail": info.get("thumbnail") or "",
+        "video_url": video_url,
+        "format": info.get("ext") or "video",
+        "source": info.get("extractor") or "",
+    }
+
+def download_with_failover(raw_url: str) -> dict:
+    url = validate_video_url(raw_url)
+    providers = [
+        ("GenDownload", provider_gendownload),
+        ("WebDownloader", provider_webdownloader),
+    ]
+    host = (urlparse(url).hostname or "").lower()
+    if host == "tiktok.com" or host.endswith(".tiktok.com"):
+        providers.append(("TikTok Downloader Worker", provider_tiktok_worker))
+    providers.append(("yt-dlp", provider_ytdlp))
+    errors = []
+    for name, function in providers:
+        try:
+            result = function(url)
+            log.info("Download resolved by %s", name)
+            result["attempted_providers"] = [x[0] for x in providers[:len(errors)+1]]
+            return result
+        except Exception as exc:
+            message = f"{name}: {type(exc).__name__}: {str(exc)[:240]}"
+            errors.append(message)
+            log.warning("Provider failed: %s", message)
+    return {
+        "status": "error",
+        "message": "Tất cả nguồn tải hiện không xử lý được liên kết này.",
+        "provider_errors": errors,
+    }
+
+@app.get("/")
+def health():
+    return {
+        "service": "AI Video Server",
+        "status": "healthy",
+        "version": app.version,
+        "gemini_configured": bool(GEMINI_API_KEY),
+        "download_providers": ["GenDownload", "WebDownloader", "TikTok Downloader Worker (TikTok only)", "yt-dlp"],
+    }
+
+@app.get("/health")
+def health_alias():
+    return health()
+
+@app.get("/providers")
+def providers():
+    return {
+        "primary": {"name": "GenDownload", "free_no_key": True},
+        "fallbacks": [
+            {"name": "WebDownloader", "free_no_key": True, "rate_limited": True},
+            {"name": "TikTok Downloader Worker", "free_no_key": True, "platforms": ["TikTok"]},
+            {"name": "yt-dlp", "self_hosted": True},
+        ],
+        "note": "Public free services may impose limits or change availability without notice."
+    }
+
+@app.post("/download")
+def download_endpoint(req: DownloadRequest):
+    result = download_with_failover(req.url)
+    if result.get("status") != "success":
+        return JSONResponse(status_code=502, content=result)
+    return result
+
 @app.post("/chat")
 def chat_endpoint(req: ChatRequest):
-    user_msg = req.message.strip()
-    if not user_msg:
-        return {"type": "text", "message": "Bạn hãy nhập câu hỏi hoặc dán link video cần tải nhé!"}
+    message = req.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Tin nhắn không được để trống.")
 
-    system_prompt = """
-    Bạn là Trợ lý AI chính thức tích hợp trong ứng dụng Poco.
-    Bạn có 2 nhiệm vụ chính:
-    1. Hướng dẫn sử dụng & giải đáp thắc mắc: Hỗ trợ người dùng tận tình, ngắn gọn, dễ hiểu bằng tiếng Việt về cách dùng các tính năng trong ứng dụng Poco (tải video không logo, quản lý file đã tải, chia sẻ...).
-    2. Tải video không logo: Bất cứ khi nào tin nhắn của người dùng có chứa đường link video (http:// hoặc https://) từ TikTok, Douyin, Facebook, Instagram, Threads, YouTube... BẮT BUỘC phải gọi ngay công cụ `download_video_no_watermark` để lấy video không logo cho họ, không cần hỏi lại.
-    """
+    video_url = extract_video_id_url(message)
+    if video_url:
+        result = download_with_failover(video_url)
+        if result.get("status") == "success":
+            return {
+                "type": "video",
+                "message": "Đã tìm thấy luồng video. Hãy tải xuống và lưu nội dung bạn có quyền sử dụng.",
+                "data": result,
+            }
+        return {"type": "text", "message": result.get("message"), "errors": result.get("provider_errors", [])}
+
+    if not gemini_client:
+        return {
+            "type": "text",
+            "message": "AI trò chuyện chưa được cấu hình. Chủ máy chủ cần thêm GEMINI_API_KEY trong biến môi trường Render. Chức năng tải video vẫn có thể hoạt động qua API /download."
+        }
 
     try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=user_msg,
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=message,
             config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                tools=[download_video_no_watermark],
-                temperature=0.2
-            )
+                system_instruction=(
+                    "Bạn là trợ lý tiếng Việt của ứng dụng MuChi. Trả lời ngắn gọn, "
+                    "chính xác về cách sử dụng ứng dụng. Không tuyên bố đã tải video "
+                    "nếu chưa có kết quả từ API tải video."
+                ),
+                temperature=0.3,
+            ),
         )
-
-        if response.candidates and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
-                if part.function_response:
-                    result = part.function_response.response
-                    if result.get("status") == "success":
-                        return {
-                            "type": "video",
-                            "message": "Video không logo của bạn đã sẵn sàng!",
-                            "data": {
-                                "title": result.get("title", "Video"),
-                                "cover": result.get("cover", ""),
-                                "video_url": result.get("video_url", ""),
-                                "source": result.get("source", "")
-                            }
-                        }
-                    else:
-                        return {
-                            "type": "text",
-                            "message": result.get("message")
-                        }
-
+        answer = getattr(response, "text", None)
+        if not answer:
+            return {"type": "text", "message": "AI không trả về nội dung. Vui lòng thử lại."}
+        return {"type": "text", "message": answer}
+    except Exception as exc:
+        log.exception("Gemini request failed")
         return {
             "type": "text",
-            "message": response.text or "Tôi có thể giúp gì cho bạn?"
+            "message": "Dịch vụ AI đang gặp lỗi hoặc quá tải. Chức năng tải video riêng vẫn có thể dùng qua /download.",
+            "error": str(exc)[:300],
         }
 
-    except Exception as e:
-        return {
-            "type": "text",
-            "message": f"Trợ lý AI đang xử lý hơi chậm một chút, bạn vui lòng gửi lại nhé! ({str(e)})"
-        }
-
-# --- GIAO DIỆN THỬ NGHIỆM TÍCH HỢP TRỰC TIẾP TRÊN SERVER (/test) ---
 @app.get("/test", response_class=HTMLResponse)
 def web_chat_test():
-    return """
-    <!DOCTYPE html>
-    <html lang="vi">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Trợ Lý AI Poco</title>
-        <style>
-            * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-            body { margin: 0; background: #f0f2f5; display: flex; flex-direction: column; height: 100vh; }
-            .header { background: #1e88e5; color: white; padding: 14px 16px; font-weight: bold; font-size: 16px; display: flex; justify-content: space-between; align-items: center; }
-            .status-dot { display: inline-block; width: 8px; height: 8px; background: #69f0ae; border-radius: 50%; margin-right: 6px; }
-            .clear-btn { background: rgba(255,255,255,0.2); border: none; color: white; padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; }
-            .chat-box { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-            .msg { max-width: 82%; padding: 10px 14px; border-radius: 14px; font-size: 15px; line-height: 1.4; word-wrap: break-word; }
-            .user { align-self: flex-end; background: #1e88e5; color: white; border-bottom-right-radius: 4px; }
-            .bot { align-self: flex-start; background: white; color: #222; border-bottom-left-radius: 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
-            .video-card { margin-top: 8px; background: #f8f9fa; border: 1px solid #e0e0e0; border-radius: 10px; padding: 8px; max-width: 260px; }
-            .video-card img { width: 100%; height: 150px; object-fit: cover; border-radius: 6px; background: #ddd; }
-            .video-title { font-size: 13px; font-weight: 600; margin: 6px 0; color: #333; }
-            .dl-btn { display: block; text-align: center; background: #2e7d32; color: white; text-decoration: none; padding: 9px; border-radius: 6px; font-size: 13px; font-weight: bold; }
-            .source-tag { font-size: 11px; color: #666; margin-top: 5px; display: block; }
-            .loading { font-size: 12px; color: #555; padding: 0 16px 6px; font-style: italic; display: none; }
-            .input-area { background: white; padding: 10px; display: flex; gap: 8px; border-top: 1px solid #ddd; }
-            input { flex: 1; padding: 10px 14px; border: 1px solid #ccc; border-radius: 20px; outline: none; font-size: 15px; }
-            button.send { background: #1e88e5; color: white; border: none; padding: 0 20px; border-radius: 20px; font-weight: bold; cursor: pointer; }
-            button.send:disabled { background: #90caf9; }
-        </style>
-    </head>
-    <body>
-    <div class="header">
-        <div><span class="status-dot"></span>Trợ Lý AI Poco</div>
-        <button class="clear-btn" id="clearBtn">Xóa lịch sử</button>
-    </div>
-    <div class="chat-box" id="chatBox"></div>
-    <div class="loading" id="loading">Trợ lý AI đang xử lý yêu cầu...</div>
-    <div class="input-area">
-        <input type="text" id="msgInput" placeholder="Hỏi cách dùng hoặc dán link video...">
-        <button class="send" id="sendBtn">Gửi</button>
-    </div>
-    <script>
-        const chatBox = document.getElementById("chatBox");
-        const msgInput = document.getElementById("msgInput");
-        const sendBtn = document.getElementById("sendBtn");
-        const clearBtn = document.getElementById("clearBtn");
-        const loading = document.getElementById("loading");
-        
+    return HTMLResponse("""<!doctype html><html lang="vi"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Video Server test</title>
+<style>body{font:16px system-ui;max-width:720px;margin:30px auto;padding:0 14px}input{width:100%;padding:12px;box-sizing:border-box}button{padding:12px;margin-top:10px}pre{white-space:pre-wrap;background:#eee;padding:12px;border-radius:8px}</style>
+</head><body><h2>Kiểm tra AI Video Server</h2><input id="msg" placeholder="Nhập câu hỏi hoặc dán link video"><button id="send">Gửi thử</button><pre id="out">Sẵn sàng</pre>
+<script>
+const input=document.getElementById('msg'),out=document.getElementById('out');
+document.getElementById('send').onclick=async()=>{const message=input.value.trim();if(!message)return;out.textContent='Đang xử lý...';try{const r=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message})});const d=await r.json();out.textContent=JSON.stringify(d,null,2)}catch(e){out.textContent='Lỗi kết nối: '+e.message}};
+</script></body></html>""")
