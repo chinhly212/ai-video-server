@@ -28,6 +28,8 @@ app.add_middleware(
 )
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 HTTP = requests.Session()
 HTTP.headers.update({"User-Agent": "Mozilla/5.0 (compatible; AIVideoServer/0.2)"})
@@ -296,36 +298,90 @@ def chat_endpoint(req: ChatRequest):
             }
         return {"type": "text", "message": result.get("message"), "errors": result.get("provider_errors", [])}
 
-    if not gemini_client:
-        return {
-            "type": "text",
-            "message": "AI trò chuyện chưa được cấu hình. Chủ máy chủ cần thêm GEMINI_API_KEY trong biến môi trường Render. Chức năng tải video vẫn có thể hoạt động qua API /download."
-        }
+    system_prompt = (
+        "Bạn là trợ lý tiếng Việt của ứng dụng MuChi. Trả lời tự nhiên, "
+        "chính xác và hữu ích. Khi người dùng gửi link video, hệ thống tải video "
+        "đã được gọi riêng; không tự nhận đã tải nếu chưa có kết quả thành công."
+    )
+    failures = []
 
-    try:
-        response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=message,
-            config=types.GenerateContentConfig(
-                system_instruction=(
-                    "Bạn là trợ lý tiếng Việt của ứng dụng MuChi. Trả lời ngắn gọn, "
-                    "chính xác về cách sử dụng ứng dụng. Không tuyên bố đã tải video "
-                    "nếu chưa có kết quả từ API tải video."
+    # Primary model: Gemini. Optional OpenAI-compatible providers are tried
+    # automatically when their keys are configured in the hosting environment.
+    if gemini_client:
+        try:
+            response = gemini_client.models.generate_content(
+                model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+                contents=message,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    temperature=0.3,
                 ),
-                temperature=0.3,
-            ),
+            )
+            answer = getattr(response, "text", None)
+            if answer:
+                return {"type": "text", "message": answer, "model_provider": "Gemini"}
+            failures.append("Gemini: empty response")
+        except Exception as exc:
+            log.warning("Gemini failed: %s", str(exc)[:240])
+            failures.append(f"Gemini: {str(exc)[:180]}")
+
+    compatible_providers = [
+        (
+            "OpenRouter",
+            OPENROUTER_API_KEY,
+            "https://openrouter.ai/api/v1/chat/completions",
+            os.getenv("OPENROUTER_MODEL", "openrouter/free"),
+        ),
+        (
+            "Groq",
+            GROQ_API_KEY,
+            "https://api.groq.com/openai/v1/chat/completions",
+            os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        ),
+    ]
+    for provider_name, api_key, endpoint, model_name in compatible_providers:
+        if not api_key:
+            continue
+        try:
+            response = HTTP.post(
+                endpoint,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": model_name,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": message},
+                    ],
+                    "temperature": 0.3,
+                },
+                timeout=(10, 60),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            answer = payload["choices"][0]["message"]["content"]
+            if isinstance(answer, list):
+                answer = " ".join(
+                    part.get("text", "") for part in answer if isinstance(part, dict)
+                )
+            if answer and str(answer).strip():
+                return {"type": "text", "message": str(answer).strip(), "model_provider": provider_name}
+            failures.append(f"{provider_name}: empty response")
+        except Exception as exc:
+            log.warning("%s failed: %s", provider_name, str(exc)[:240])
+            failures.append(f"{provider_name}: {str(exc)[:180]}")
+
+    if not (GEMINI_API_KEY or OPENROUTER_API_KEY or GROQ_API_KEY):
+        message_text = (
+            "Chưa cấu hình API mô hình AI. Chủ máy chủ cần thêm ít nhất một khóa "
+            "GEMINI_API_KEY, OPENROUTER_API_KEY hoặc GROQ_API_KEY trong biến môi trường Render. "
+            "Chức năng tải video vẫn hoạt động độc lập."
         )
-        answer = getattr(response, "text", None)
-        if not answer:
-            return {"type": "text", "message": "AI không trả về nội dung. Vui lòng thử lại."}
-        return {"type": "text", "message": answer}
-    except Exception as exc:
-        log.exception("Gemini request failed")
-        return {
-            "type": "text",
-            "message": "Dịch vụ AI đang gặp lỗi hoặc quá tải. Chức năng tải video riêng vẫn có thể dùng qua /download.",
-            "error": str(exc)[:300],
-        }
+    else:
+        message_text = (
+            "Các mô hình AI hiện không phản hồi. Hệ thống đã thử các nhà cung cấp "
+            "được cấu hình; vui lòng thử lại sau. Chức năng tải video vẫn hoạt động độc lập."
+        )
+    return {"type": "text", "message": message_text, "provider_errors": failures}
 
 @app.get("/test", response_class=HTMLResponse)
 def web_chat_test():
