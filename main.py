@@ -64,7 +64,7 @@ def validate_video_url(raw_url: str) -> str:
     return value
 
 def extract_video_id_url(text: str) -> Optional[str]:
-    match = re.search(r"https?://[^\s<>\\"']+", text)
+    match = re.search(r"https?://[^\s<>]+", text)
     return match.group(0).rstrip(".,);]") if match else None
 
 def choose_gen_download_format(data: dict) -> Optional[dict]:
