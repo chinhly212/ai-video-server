@@ -2,5 +2,5 @@ fastapi
 uvicorn
 google-genai
 requests
-yt-dlp
+yt-dlp[default,curl-cffi]==2026.10.26
 playwright==1.61.0
