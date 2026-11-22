@@ -12,7 +12,7 @@ import requests
 import yt_dlp
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
@@ -42,6 +42,11 @@ class ChatRequest(BaseModel):
 
 class DownloadRequest(BaseModel):
     url: str = Field(min_length=8, max_length=4096)
+
+class VideoProxyRequest(BaseModel):
+    video_url: str = Field(min_length=8, max_length=8192)
+    source_url: str = Field(min_length=8, max_length=4096)
+    provider: str = Field(default="", max_length=120)
 
 ALLOWED_HOST_SUFFIXES = (
     "tiktok.com", "tiktokv.com", "tiktokcdn.com", "douyin.com",
@@ -394,6 +399,115 @@ def validate_api_endpoint(
         raise HTTPException(status_code=504, detail="Hết thời gian chờ khi kiểm tra API.")
     except requests.RequestException:
         raise HTTPException(status_code=502, detail="Không thể kết nối nhà cung cấp API. Kiểm tra mạng hoặc thử lại.")
+
+
+def validate_public_media_url(raw_url: str) -> str:
+    value = raw_url.strip()
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise HTTPException(status_code=400, detail="URL file video không hợp lệ.")
+    if parsed.username or parsed.password:
+        raise HTTPException(status_code=400, detail="URL file video chứa thông tin đăng nhập không được phép.")
+    host = parsed.hostname.lower().rstrip(".")
+    try:
+        infos = socket.getaddrinfo(host, None)
+        if not infos:
+            raise HTTPException(status_code=400, detail="Không phân giải được máy chủ file video.")
+        for info in infos:
+            ip = ipaddress.ip_address(info[4][0])
+            if not ip.is_global:
+                raise HTTPException(status_code=400, detail="Máy chủ file video trỏ đến địa chỉ mạng riêng hoặc không an toàn.")
+    except socket.gaierror:
+        raise HTTPException(status_code=400, detail="Không phân giải được máy chủ file video.")
+    return value
+
+
+@app.post("/download/proxy")
+def download_proxy_endpoint(req: VideoProxyRequest):
+    # The Android client must not fetch short-lived provider/CDN links directly:
+    # some CDNs reject mobile requests with HTTP 409. Fetch the media from the
+    # same server that resolved the link and stream it back to the device.
+    validate_video_url(req.source_url)
+    media_url = validate_public_media_url(req.video_url)
+    source_host = (urlparse(req.source_url).hostname or "").lower()
+    if source_host.endswith("kuaishou.com") or source_host.endswith("gifshow.com"):
+        referer = "https://www.kuaishou.com/"
+        user_agent = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
+    elif source_host.endswith("tiktok.com") or source_host.endswith("tiktokv.com"):
+        referer = "https://www.tiktok.com/"
+        user_agent = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+    elif source_host.endswith("douyin.com") or source_host.endswith("iesdouyin.com"):
+        referer = "https://www.douyin.com/"
+        user_agent = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+    else:
+        referer = req.source_url
+        user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+    headers = {
+        "User-Agent": user_agent,
+        "Accept": "video/*,application/octet-stream;q=0.9,*/*;q=0.8",
+        "Referer": referer,
+    }
+    upstream = None
+    current_url = media_url
+    try:
+        for _ in range(6):
+            validate_public_media_url(current_url)
+            upstream = HTTP.get(
+                current_url,
+                headers=headers,
+                stream=True,
+                allow_redirects=False,
+                timeout=(15, 120),
+            )
+            if upstream.is_redirect:
+                location = upstream.headers.get("Location")
+                upstream.close()
+                if not location:
+                    raise HTTPException(status_code=502, detail="CDN chuyển hướng nhưng không cung cấp URL đích.")
+                from urllib.parse import urljoin
+                current_url = urljoin(current_url, location)
+                continue
+            break
+        else:
+            raise HTTPException(status_code=502, detail="CDN chuyển hướng quá nhiều lần.")
+        if upstream is None:
+            raise HTTPException(status_code=502, detail="Không nhận được phản hồi từ CDN.")
+        if upstream.status_code < 200 or upstream.status_code >= 300:
+            status = upstream.status_code
+            detail = f"CDN từ chối gửi file video (HTTP {status})."
+            upstream.close()
+            raise HTTPException(status_code=502, detail=detail)
+        content_type = upstream.headers.get("Content-Type", "application/octet-stream").lower()
+        if "text/html" in content_type or "application/json" in content_type:
+            upstream.close()
+            raise HTTPException(status_code=502, detail=f"CDN trả về nội dung không phải video ({content_type}).")
+
+        def stream_media():
+            try:
+                for chunk in upstream.iter_content(chunk_size=256 * 1024):
+                    if chunk:
+                        yield chunk
+            finally:
+                upstream.close()
+
+        response_headers = {"X-Video-Provider": req.provider[:120]}
+        content_length = upstream.headers.get("Content-Length")
+        if content_length and content_length.isdigit():
+            response_headers["Content-Length"] = content_length
+        return StreamingResponse(
+            stream_media(),
+            media_type=content_type,
+            headers=response_headers,
+        )
+    except HTTPException:
+        raise
+    except requests.RequestException as exc:
+        if upstream is not None:
+            upstream.close()
+        log.warning("Video proxy failed: %s", str(exc)[:300])
+        raise HTTPException(status_code=502, detail=f"Máy chủ không lấy được file từ CDN: {type(exc).__name__}: {str(exc)[:180]}")
+
 
 @app.post("/download")
 def download_endpoint(req: DownloadRequest):
