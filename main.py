@@ -700,6 +700,34 @@ def chat_endpoint(
             ),
         }
 
+    if re.search(r"(đăng nhập|login).*(douyin|kuaishou)|(douyin|kuaishou).*(đăng nhập|login)", normalized_message):
+        platform = "Douyin" if "douyin" in normalized_message else "Kuaishou"
+        return {
+            "type": "text",
+            "message": (
+                f"Đăng nhập {platform}: 1. Mở Cài đặt > Đăng nhập nền tảng > {platform}. "
+                f"2. Đăng nhập trên trang {platform} chính thức mở bên trong MuChi. "
+                "3. Khi đăng nhập xong, bấm 'Đã đăng nhập – lưu phiên'. "
+                f"4. Vào Cài đặt > Thêm tài khoản, chọn {platform}, nhập ID hoặc URL hồ sơ, "
+                "xác minh thông tin rồi bật tài khoản. "
+                "5. Vào Công việc > Quét ngay để bắt đầu. "
+                "Không gửi mật khẩu hoặc mã xác minh cho tôi qua chat."
+            ),
+        }
+
+    if re.search(r"(quét video|quét kênh|theo dõi kênh|theo dõi tài khoản)", normalized_message):
+        return {
+            "type": "text",
+            "message": (
+                "Quy trình theo dõi và quét video: 1. Đăng nhập Douyin hoặc Kuaishou trong Cài đặt. "
+                "2. Chọn Thêm tài khoản, nhập ID hoặc URL hồ sơ và xác minh. "
+                "3. Bật tài khoản muốn theo dõi. 4. Vào Công việc > Quét ngay. "
+                "5. MuChi lấy video mới từ các tài khoản đang bật, bỏ qua video trùng, "
+                "thêm video mới vào hàng đợi và tự chạy các bước xử lý được cấu hình. "
+                "Chủ nhân theo dõi tiến trình trong Công việc; nếu có lỗi, xem Thông báo hệ thống ở Trang chủ."
+            ),
+        }
+
     if re.search(r"\b(api|gemini|openrouter|deepseek|mô hình ai|nhà cung cấp mô hình)\b", normalized_message):
         return {
             "type": "text",
