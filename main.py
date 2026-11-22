@@ -258,7 +258,10 @@ def provider_ytdlp(url: str) -> dict:
         "noplaylist": True,
         "socket_timeout": 25,
         "retries": 1,
-        "extractor_retries": 1,
+        "extractor_retries": 2,
+        # TikTok may require TLS/browser impersonation. curl-cffi is installed
+        # through the yt-dlp extra in requirements.txt.
+        "impersonate": "chrome",
     }
     with yt_dlp.YoutubeDL(options) as ydl:
         info = ydl.extract_info(url, download=False)
