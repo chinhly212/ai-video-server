@@ -143,6 +143,17 @@ def extract_video_id_url(text: str) -> Optional[str]:
     match = re.search(r"https?://[^\s<>]+", text)
     return match.group(0).rstrip(".,);]") if match else None
 
+def safe_ai_answer(answer: str) -> str:
+    value = str(answer or "").strip()
+    internal_details = re.compile(
+        r"\b(gemini|openrouter|deepseek|api(?:\s*key)?|endpoint|provider|nhà cung cấp mô hình)\b",
+        re.IGNORECASE,
+    )
+    if internal_details.search(value):
+        return "Đó là thông tin cấu hình nội bộ của ứng dụng. Tôi có thể hướng dẫn chủ nhân sử dụng các chức năng MuChi."
+    return value
+
+
 def choose_gen_download_format(data: dict) -> Optional[dict]:
     formats = data.get("formats") or []
     videos = [
@@ -691,6 +702,21 @@ def chat_endpoint(
             ),
         }
 
+    if re.search(r"\b(api|gemini|openrouter|deepseek|mô hình ai|nhà cung cấp mô hình)\b", normalized_message):
+        return {
+            "type": "text",
+            "message": "Tôi không chia sẻ thông tin cấu hình kỹ thuật nội bộ. Chủ nhân có thể quản lý kết nối trợ lý trong phần Cài đặt.",
+        }
+
+    if re.search(
+        r"(đánh cắp|lấy trộm|chiếm đoạt|phishing|keylogger|ransomware|mã độc|xâm nhập trái phép|vượt xác thực|bypass đăng nhập)",
+        normalized_message,
+    ):
+        return {
+            "type": "text",
+            "message": "Xin lỗi chủ nhân, tôi không thể hỗ trợ yêu cầu có thể xâm phạm quyền riêng tư hoặc gây hại.",
+        }
+
     system_prompt = (
         "Bạn là trợ lý AI riêng của ứng dụng MuChi. Chủ sở hữu ứng dụng là Chính Ly. "
         "Chỉ nêu tên Chính Ly khi người dùng hỏi trực tiếp về chủ app, người tạo hoặc chủ sở hữu; "
@@ -763,7 +789,7 @@ def chat_endpoint(
             )
             answer = getattr(response, "text", None)
             if answer:
-                return {"type": "text", "message": answer, "model_provider": "Gemini"}
+                return {"type": "text", "message": safe_ai_answer(answer), "model_provider": "Gemini"}
             failures.append("Gemini: empty response")
         except Exception as exc:
             log.warning("Gemini failed: %s", str(exc)[:240])
@@ -813,7 +839,7 @@ def chat_endpoint(
                     part.get("text", "") for part in answer if isinstance(part, dict)
                 )
             if answer and str(answer).strip():
-                return {"type": "text", "message": str(answer).strip(), "model_provider": provider_name}
+                return {"type": "text", "message": safe_ai_answer(str(answer)), "model_provider": provider_name}
             failures.append(f"{provider_name}: empty response")
         except Exception as exc:
             log.warning("%s failed: %s", provider_name, str(exc)[:240])
