@@ -224,7 +224,7 @@ def provider_kuaishou(url: str) -> dict:
     response.raise_for_status()
     page = html_lib.unescape(response.text)
     page = page.replace("\\/", "/").replace("\\u002F", "/").replace("\\u0026", "&")
-    matches = re.findall(r"""https?://[^\\s"'<>]+?\\.mp4(?:\\?[^\\s"'<>]*)?""", page)
+    matches = re.findall(r"""https?://[^\s"'<>]+?\.mp4(?:\?[^\s"'<>]*)?""", page)
     unique = {}
     for candidate in matches:
         candidate = candidate.rstrip("),;")
@@ -238,7 +238,7 @@ def provider_kuaishou(url: str) -> dict:
     others = [item for item in candidates if item not in hd and item not in standard]
     video_url = (hd or standard or others)[0]
     title_match = re.search(r"<title[^>]*>(.*?)</title>", page, flags=re.IGNORECASE | re.DOTALL)
-    title = re.sub(r"\\s+", " ", title_match.group(1)).strip() if title_match else "Kuaishou video"
+    title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else "Kuaishou video"
     return {
         "status": "success",
         "provider": "Kuaishou SSR",
