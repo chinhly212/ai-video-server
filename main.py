@@ -140,7 +140,7 @@ def validate_video_url(raw_url: str) -> str:
 
 
 def extract_video_id_url(text: str) -> Optional[str]:
-    match = re.search(r"https?://[^\\s<>]+", text)
+    match = re.search(r"https?://[^\s<>]+", text)
     return match.group(0).rstrip(".,);]") if match else None
 
 def choose_gen_download_format(data: dict) -> Optional[dict]:
@@ -612,9 +612,9 @@ def download_proxy_endpoint(req: VideoProxyRequest):
         direct_error = str(exc.detail)
     except requests.RequestException as exc:
         direct_error = f"{type(exc).__name__}: {str(exc)[:160]}"
-    finally:
-        if upstream is not None:
-            upstream.close()
+    if upstream is not None:
+        upstream.close()
+        upstream = None
 
     # A CDN may reject the server's direct request (for example HTTP 409).
     # Retry by letting yt-dlp download the original public platform page on
@@ -647,7 +647,7 @@ def chat_endpoint(
     if not message:
         raise HTTPException(status_code=400, detail="Tin nhắn không được để trống.")
 
-    urls = re.findall(r"https?://[^\\s<>]+", message)
+    urls = re.findall(r"https?://[^\s<>]+", message)
     if urls:
         if len(urls) != 1:
             return {
