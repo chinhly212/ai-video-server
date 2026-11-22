@@ -218,3 +218,53 @@ def test_chat_explains_channel_scan_workflow():
     assert "bỏ qua video trùng" in result["message"]
     assert "Thông báo hệ thống" in result["message"]
 
+
+
+def test_kuaishou_profile_url_extracts_profile_eid():
+    import kuaishou_api
+    assert kuaishou_api._user_id_from_url("https://www.kuaishou.com/profile/3xz63mn6fngqtiq") == "3xz63mn6fngqtiq"
+
+
+def test_kuaishou_profile_url_rejects_video_links():
+    import pytest
+    import kuaishou_api
+    with pytest.raises(Exception):
+        kuaishou_api._user_id_from_url("https://www.kuaishou.com/short-video/abc123")
+
+
+def test_kuaishou_short_profile_link_resolves_to_profile(monkeypatch):
+    import kuaishou_api
+    class FakeResponse:
+        url = "https://www.kuaishou.com/profile/3xz63mn6fngqtiq"
+        def close(self):
+            return None
+    monkeypatch.setattr(kuaishou_api.requests, "get", lambda *args, **kwargs: FakeResponse())
+    assert kuaishou_api._user_id_from_url("https://v.kuaishou.com/AbCdEf") == "3xz63mn6fngqtiq"
+
+
+def test_kuaishou_timestamps_normalize_seconds_and_milliseconds():
+    import kuaishou_api
+    assert kuaishou_api._timestamp_ms(1795305600) == 1795305600000
+    assert kuaishou_api._timestamp_ms(1795305600000) == 1795305600000
+    assert kuaishou_api._timestamp_ms(None) is None
+
+
+def test_kuaishou_profile_graphql_returns_following_and_video_counts():
+    import kuaishou_api
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+        def json(self):
+            return {"data": {"visionProfile": {"userProfile": {
+                "ownerCount": {"fan": 1200, "follow": 87, "photo": 300, "photo_public": 298},
+                "profile": {"user_name": "Test User", "user_id": "123456", "headurl": "https://img.example/avatar.jpg", "user_text": "Bio"}
+            }}}}
+    class FakeSession:
+        def post(self, *args, **kwargs):
+            return FakeResponse()
+    result = kuaishou_api._profile_from_graphql(FakeSession(), "3xz63mn6fngqtiq")
+    assert result["display_name"] == "Test User"
+    assert result["profile_id"] == "3xz63mn6fngqtiq"
+    assert result["follower_count"] == 1200
+    assert result["following_count"] == 87
+    assert result["video_count"] == 298
