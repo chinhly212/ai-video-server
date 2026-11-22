@@ -675,7 +675,7 @@ def chat_endpoint(
 
     normalized_message = message.lower()
     if re.search(
-        r"(chủ\\s*(sở hữu|app|ứng dụng)|người\\s*tạo|ai\\s*(là\\s*)?(chủ|tạo|làm).*(muchi|ứng dụng|app))",
+        r"(chủ\s*(sở hữu|app|ứng dụng)|người\s*tạo|ai\s*(là\s*)?(chủ|tạo|làm).*(muchi|ứng dụng|app))",
         normalized_message,
     ):
         return {"type": "text", "message": "Chủ sở hữu ứng dụng MuChi là Chính Ly."}
