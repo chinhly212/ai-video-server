@@ -853,7 +853,7 @@ def chat_endpoint(
             "Các mô hình AI hiện không phản hồi. Hệ thống đã thử các nhà cung cấp "
             "được cấu hình; vui lòng thử lại sau. Chức năng tải video vẫn hoạt động độc lập."
         )
-    return {"type": "text", "message": message_text, "provider_errors": failures}
+    return {"type": "error", "message": message_text, "provider_errors": failures}
 
 @app.get("/test", response_class=HTMLResponse)
 def web_chat_test():
