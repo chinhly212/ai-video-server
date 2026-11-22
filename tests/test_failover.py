@@ -144,3 +144,21 @@ def test_chat_rejects_external_links_without_calling_downloaders(monkeypatch):
     assert result["type"] == "unsupported_link"
     assert "không được hỗ trợ" in result["message"]
 
+def test_chat_identifies_app_owner_only_when_asked():
+    request = main.ChatRequest(message="Ai là chủ app MuChi?")
+    result = main.chat_endpoint(request, "", "", "")
+    assert result["type"] == "text"
+    assert result["message"] == "Chủ sở hữu ứng dụng MuChi là Chính Ly."
+
+
+def test_chat_lists_supported_platforms_without_internal_provider_details():
+    request = main.ChatRequest(message="MuChi hỗ trợ bao nhiêu nền tảng tải video?")
+    result = main.chat_endpoint(request, "", "", "")
+    assert result["type"] == "text"
+    assert "TikTok" in result["message"]
+    assert "Douyin" in result["message"]
+    assert "Kuaishou" in result["message"]
+    assert "Gemini" not in result["message"]
+    assert "DeepSeek" not in result["message"]
+    assert "OpenRouter" not in result["message"]
+
