@@ -1,5 +1,6 @@
 import os
 import re
+import html as html_lib
 import ipaddress
 import socket
 import logging
@@ -204,6 +205,51 @@ def provider_tiktok_worker(url: str) -> dict:
         "source": "TikTok",
     }
 
+def provider_kuaishou(url: str) -> dict:
+    """Resolve a public Kuaishou share page's inline MP4 stream (SSR)."""
+    user_agent = (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 "
+        "Mobile/15E148 Safari/604.1"
+    )
+    response = HTTP.get(
+        url,
+        headers={
+            "User-Agent": user_agent,
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Referer": "https://www.kuaishou.com/",
+        },
+        timeout=(10, 25),
+    )
+    response.raise_for_status()
+    page = html_lib.unescape(response.text)
+    page = page.replace("\\/", "/").replace("\\u002F", "/").replace("\\u0026", "&")
+    matches = re.findall(r"""https?://[^\\s"'<>]+?\\.mp4(?:\\?[^\\s"'<>]*)?""", page)
+    unique = {}
+    for candidate in matches:
+        candidate = candidate.rstrip("),;")
+        key = candidate.split("?", 1)[0]
+        unique.setdefault(key, candidate)
+    candidates = list(unique.values())
+    if not candidates:
+        raise RuntimeError("Trang chia sẻ Kuaishou không chứa link MP4; liên kết có thể riêng tư, hết hạn hoặc trang đã đổi cấu trúc.")
+    hd = [item for item in candidates if "hd15" in item or "_hd" in item]
+    standard = [item for item in candidates if "_b_" in item]
+    others = [item for item in candidates if item not in hd and item not in standard]
+    video_url = (hd or standard or others)[0]
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", page, flags=re.IGNORECASE | re.DOTALL)
+    title = re.sub(r"\\s+", " ", title_match.group(1)).strip() if title_match else "Kuaishou video"
+    return {
+        "status": "success",
+        "provider": "Kuaishou SSR",
+        "title": title or "Kuaishou video",
+        "thumbnail": "",
+        "video_url": video_url,
+        "format": "mp4",
+        "source": "Kuaishou",
+    }
+
+
 def provider_ytdlp(url: str) -> dict:
     options = {
         "format": "best[ext=mp4]/best",
@@ -242,6 +288,11 @@ def download_with_failover(raw_url: str) -> dict:
     host = (urlparse(url).hostname or "").lower()
     if host == "tiktok.com" or host.endswith(".tiktok.com"):
         providers.append(("TikTok Downloader Worker", provider_tiktok_worker))
+    if (
+        host == "kuaishou.com" or host.endswith(".kuaishou.com")
+        or host == "gifshow.com" or host.endswith(".gifshow.com")
+    ):
+        providers.append(("Kuaishou SSR", provider_kuaishou))
     providers.append(("yt-dlp", provider_ytdlp))
     errors = []
     for name, function in providers:
