@@ -58,7 +58,7 @@ class VideoProxyRequest(BaseModel):
     provider: str = Field(default="", max_length=120)
 
 ALLOWED_HOST_SUFFIXES = (
-    "tiktok.com", "tiktokv.com", "tiktokcdn.com", "douyin.com",
+    "tiktok.com", "tiktokcdn.com", "douyin.com",
     "iesdouyin.com", "kuaishou.com", "gifshow.com", "youtube.com",
     "youtu.be", "googlevideo.com", "instagram.com", "cdninstagram.com",
     "facebook.com", "fb.watch", "fbcdn.net", "threads.net", "x.com",
@@ -81,8 +81,6 @@ def is_supported_video_link(raw_url: str) -> bool:
             if host in ("vm.tiktok.com", "vt.tiktok.com"):
                 return path not in ("", "/")
             return bool(re.search(r"/@[^/]+/video/[^/?]+|/t/[^/]+|/v/[^/]+", path))
-        if host_is("tiktokv.com"):
-            return bool(path and path != "/")
         if host_is("douyin.com") or host_is("iesdouyin.com"):
             if host == "v.douyin.com":
                 return path not in ("", "/")
