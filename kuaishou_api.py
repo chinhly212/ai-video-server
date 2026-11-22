@@ -131,7 +131,7 @@ def _profile_from_graphql(session: requests.Session, profile_id: str) -> dict[st
             "description": profile.get("user_text"),
             "follower_count": _safe_int(owner.get("fan")),
             "following_count": _safe_int(owner.get("follow")),
-            "video_count": _safe_int(owner.get("photo_public") or owner.get("photo")),
+            "video_count": _safe_int(owner.get("photo") if owner.get("photo") is not None else owner.get("photo_public")),
         }
     except Exception as exc:
         log.warning("Kuaishou profile metadata lookup failed: %s", exc)
