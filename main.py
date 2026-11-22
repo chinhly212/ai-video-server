@@ -447,7 +447,7 @@ def chat_endpoint(
     if not (request_gemini_key or request_openrouter_key or request_deepseek_key):
         message_text = (
             "Chưa cấu hình API mô hình AI. Chủ máy chủ cần thêm ít nhất một khóa "
-            "GEMINI_API_KEY, OPENROUTER_API_KEY hoặc GROQ_API_KEY trong biến môi trường Render. "
+            "GEMINI_API_KEY, OPENROUTER_API_KEY hoặc DEEPSEEK_API_KEY trong biến môi trường Render. "
             "Chức năng tải video vẫn hoạt động độc lập."
         )
     else:
