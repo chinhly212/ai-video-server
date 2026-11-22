@@ -49,29 +49,99 @@ class ProfileScanRequest(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
     cookie: str = Field(min_length=8, max_length=16000)
     max_pages: int = Field(default=5, ge=1, le=10)
+    since_timestamp: int | None = Field(default=None, ge=0)
 
 def _user_id_from_url(value: str) -> str:
     raw = value.strip()
-    # Accept a bare Kuaishou user ID as well as a canonical profile URL.
-    # Do not interpret arbitrary URLs or share links as account IDs.
-    if re.fullmatch(r"[A-Za-z0-9_-]{3,128}", raw):
-        return raw
-
     parsed = urlparse(raw)
-    if parsed.scheme not in ("http", "https") or parsed.hostname not in (
-        "kuaishou.com", "www.kuaishou.com", "m.kuaishou.com"
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="Nhập ID tài khoản hoặc URL hồ sơ Kuaishou dạng https://www.kuaishou.com/profile/ID."
-        )
-    match = re.search(r"/profile/([A-Za-z0-9_-]{3,128})(?:/|$)", parsed.path)
+    allowed_hosts = {
+        "kuaishou.com", "www.kuaishou.com", "m.kuaishou.com",
+        "v.kuaishou.com", "gifshow.com", "www.gifshow.com", "v.gifshow.com",
+    }
+    if parsed.scheme not in ("http", "https") or (parsed.hostname or "").lower() not in allowed_hosts:
+        raise HTTPException(status_code=400, detail="Dán liên kết trang cá nhân Kuaishou hợp lệ.")
+    resolved = raw
+    if (parsed.hostname or "").lower() in {"v.kuaishou.com", "v.gifshow.com"}:
+        try:
+            response = requests.get(
+                raw,
+                headers={"User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36"},
+                allow_redirects=True,
+                timeout=(10, 25),
+                stream=True,
+            )
+            resolved = response.url
+            response.close()
+        except requests.RequestException as exc:
+            raise HTTPException(status_code=502, detail=f"Không mở được liên kết hồ sơ Kuaishou: {exc}") from exc
+    final = urlparse(resolved)
+    final_host = (final.hostname or "").lower()
+    if final_host not in {"kuaishou.com", "www.kuaishou.com", "m.kuaishou.com"}:
+        raise HTTPException(status_code=400, detail="Liên kết không dẫn tới trang cá nhân Kuaishou.")
+    match = re.search(r"/(?:profile|fw/user)/([A-Za-z0-9_-]{3,128})(?:/|$)", final.path)
     if not match:
         raise HTTPException(
             status_code=400,
-            detail="URL chưa có mã hồ sơ /profile/. Liên kết chia sẻ ngắn chưa được hỗ trợ."
+            detail="Liên kết này chưa phải trang cá nhân Kuaishou. Hãy mở hồ sơ người dùng rồi sao chép liên kết trang cá nhân, không dùng liên kết video."
         )
     return match.group(1)
+
+def _timestamp_ms(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        stamp = int(value)
+    except (TypeError, ValueError):
+        return None
+    if stamp <= 0:
+        return None
+    return stamp * 1000 if stamp < 100_000_000_000 else stamp
+
+def _profile_from_graphql(session: requests.Session, profile_id: str) -> dict[str, Any]:
+    query = """query visionProfile($userId: String) {
+      visionProfile(userId: $userId) {
+        result
+        userProfile {
+          ownerCount { fan photo follow photo_public }
+          profile { gender user_name user_id headurl user_text }
+          isFollowing
+        }
+      }
+    }"""
+    try:
+        response = session.post(
+            "https://www.kuaishou.com/graphql",
+            json={"operationName": "visionProfile", "variables": {"userId": profile_id}, "query": query},
+            timeout=(10, 30),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        data = (payload.get("data") or {}).get("visionProfile") or {}
+        user_profile = data.get("userProfile") or {}
+        owner = user_profile.get("ownerCount") or {}
+        profile = user_profile.get("profile") or {}
+        name = profile.get("user_name")
+        if not name:
+            return {}
+        return {
+            "display_name": name,
+            "profile_id": profile_id,
+            "user_id": str(profile.get("user_id") or profile_id),
+            "avatar_url": profile.get("headurl"),
+            "description": profile.get("user_text"),
+            "follower_count": _safe_int(owner.get("fan")),
+            "following_count": _safe_int(owner.get("follow")),
+            "video_count": _safe_int(owner.get("photo_public") or owner.get("photo")),
+        }
+    except Exception as exc:
+        log.warning("Kuaishou profile metadata lookup failed: %s", exc)
+        return {}
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None and str(value).strip() else None
+    except (TypeError, ValueError):
+        return None
 
 def _cookie_pairs(raw: str) -> list[dict[str, Any]]:
     result = []
@@ -86,14 +156,18 @@ def _cookie_pairs(raw: str) -> list[dict[str, Any]]:
         raise HTTPException(status_code=401, detail="Cookie phiên Kuaishou không hợp lệ hoặc đang trống.")
     return result
 
-def _profile_scan(user_id: str, cookie: str, max_pages: int) -> dict:
+def _profile_scan(
+    user_id: str,
+    cookie: str,
+    max_pages: int,
+    since_timestamp: int | None = None,
+) -> dict:
     cookie_pairs = _cookie_pairs(cookie)
     user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     videos: list[dict] = []
     seen: set[str] = set()
-    profile: dict[str, Any] = {"user_id": user_id}
-    cursor = ""
     pages_checked = 0
+    cursor = ""
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -117,7 +191,11 @@ def _profile_scan(user_id: str, cookie: str, max_pages: int) -> dict:
                 "Content-Type": "application/json;charset=UTF-8",
                 "Cookie": cookie,
             })
+            profile: dict[str, Any] = _profile_from_graphql(session, user_id)
+            profile.setdefault("profile_id", user_id)
+            profile.setdefault("user_id", user_id)
             endpoint = "/rest/v/profile/feed"
+
             for page_number in range(max_pages):
                 body = {"user_id": user_id, "pcursor": cursor, "page": "profile"}
                 signature = page.evaluate(
@@ -145,8 +223,10 @@ def _profile_scan(user_id: str, cookie: str, max_pages: int) -> dict:
                     if code == 50:
                         raise HTTPException(status_code=401, detail="Phiên đăng nhập hoặc chữ ký Kuaishou không hợp lệ. Hãy đăng nhập lại.")
                     raise HTTPException(status_code=502, detail=f"Kuaishou trả lỗi API: {code}")
+
                 pages_checked += 1
                 feeds = payload.get("feeds") or []
+                older_than_today = False
                 for feed in feeds:
                     if not isinstance(feed, dict):
                         continue
@@ -156,25 +236,40 @@ def _profile_scan(user_id: str, cookie: str, max_pages: int) -> dict:
                     if not video_id or video_id in seen:
                         continue
                     seen.add(video_id)
-                    profile["display_name"] = author.get("name") or profile.get("display_name")
-                    profile["avatar_url"] = author.get("headerUrl") or author.get("avatar") or profile.get("avatar_url")
+                    if not profile.get("display_name"):
+                        profile["display_name"] = author.get("name")
+                    if not profile.get("avatar_url"):
+                        profile["avatar_url"] = author.get("headerUrl") or author.get("avatar")
+                    published_at = _timestamp_ms(photo.get("timestamp") or photo.get("time"))
+                    if published_at is None:
+                        continue
+                    if since_timestamp is not None and published_at < since_timestamp:
+                        older_than_today = True
+                        continue
                     videos.append({
                         "id": video_id,
                         "url": "https://www.kuaishou.com/short-video/" + video_id,
                         "title": photo.get("caption") or photo.get("title") or "",
                         "description": photo.get("caption") or "",
-                        "published_at": photo.get("timestamp") or photo.get("time"),
+                        "published_at": published_at,
                     })
+
                 next_cursor = str(payload.get("pcursor") or "")
-                if not feeds or not next_cursor or next_cursor == cursor:
+                if older_than_today or not feeds or not next_cursor or next_cursor == cursor:
                     cursor = ""
                     break
                 cursor = next_cursor
                 if page_number + 1 < max_pages:
-                    time.sleep(2.0)
+                    time.sleep(1.2)
         finally:
             context.close()
             browser.close()
+
+    if not profile.get("display_name"):
+        raise HTTPException(
+            status_code=404,
+            detail="Không xác minh được hồ sơ Kuaishou. Kiểm tra liên kết trang cá nhân và phiên đăng nhập."
+        )
 
     return {
         "status": "success",
@@ -191,7 +286,7 @@ def _profile_scan(user_id: str, cookie: str, max_pages: int) -> dict:
 def scan_profile_videos(request: ProfileScanRequest):
     user_id = _user_id_from_url(request.url)
     try:
-        return _profile_scan(user_id, request.cookie, request.max_pages)
+        return _profile_scan(user_id, request.cookie, request.max_pages, request.since_timestamp)
     except HTTPException:
         raise
     except Exception as exc:
