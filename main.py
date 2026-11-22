@@ -20,6 +20,8 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ai-video-server")
 
 app = FastAPI(title="AI Video Server", version="0.2.0")
+from kuaishou_api import router as kuaishou_router
+app.include_router(kuaishou_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
