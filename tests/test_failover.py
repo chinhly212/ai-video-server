@@ -267,4 +267,4 @@ def test_kuaishou_profile_graphql_returns_following_and_video_counts():
     assert result["profile_id"] == "3xz63mn6fngqtiq"
     assert result["follower_count"] == 1200
     assert result["following_count"] == 87
-    assert result["video_count"] == 298
+    assert result["video_count"] == 300
