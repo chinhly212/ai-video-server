@@ -673,6 +673,24 @@ def chat_endpoint(
             "errors": result.get("provider_errors", []),
         }
 
+    normalized_message = message.lower()
+    if re.search(
+        r"(chủ\\s*(sở hữu|app|ứng dụng)|người\\s*tạo|ai\\s*(là\\s*)?(chủ|tạo|làm).*(muchi|ứng dụng|app))",
+        normalized_message,
+    ):
+        return {"type": "text", "message": "Chủ sở hữu ứng dụng MuChi là Chính Ly."}
+
+    if re.search(r"(hỗ trợ.*nền tảng|nền tảng.*hỗ trợ|bao nhiêu.*nền tảng)", normalized_message):
+        return {
+            "type": "text",
+            "message": (
+                "MuChi nhận link video từ 10 nền tảng: TikTok, Douyin, Kuaishou, YouTube, "
+                "Instagram, Facebook, Threads, X/Twitter, Reddit và Bilibili. "
+                "Tính năng theo dõi và quét kênh hiện hỗ trợ Douyin và Kuaishou. "
+                "Video cần ở chế độ công khai và khả dụng thì mới có thể tải."
+            ),
+        }
+
     system_prompt = (
         "Bạn là trợ lý AI riêng của ứng dụng MuChi. Chủ sở hữu ứng dụng là Chính Ly. "
         "Chỉ nêu tên Chính Ly khi người dùng hỏi trực tiếp về chủ app, người tạo hoặc chủ sở hữu; "
