@@ -101,3 +101,46 @@ def test_rejects_non_http_and_unknown_hosts():
             pass
         else:
             raise AssertionError(f"URL should be rejected: {url}")
+
+def test_only_supported_video_links_are_accepted():
+    supported = [
+        "https://www.tiktok.com/@creator/video/123",
+        "https://vm.tiktok.com/AbCdEf/",
+        "https://www.douyin.com/video/123",
+        "https://v.douyin.com/AbCd/",
+        "https://www.kuaishou.com/short-video/abc123",
+        "https://v.kuaishou.com/AbCd/",
+        "https://www.youtube.com/watch?v=abc123",
+        "https://youtu.be/abc123",
+        "https://www.instagram.com/reel/abc123/",
+        "https://www.facebook.com/reel/123456/",
+        "https://www.threads.net/@user/post/abc123",
+        "https://x.com/user/status/123456",
+        "https://www.reddit.com/r/test/comments/abc123/post/",
+        "https://www.bilibili.com/video/BV1234567890",
+        "https://b23.tv/AbCd",
+    ]
+    assert all(main.is_supported_video_link(url) for url in supported)
+
+
+def test_rejects_external_and_non_video_platform_pages():
+    rejected = [
+        "https://example.com/video.mp4",
+        "https://www.google.com/",
+        "https://www.tiktok.com/",
+        "https://www.youtube.com/",
+        "https://www.instagram.com/user/",
+        "https://www.facebook.com/profile.php?id=123",
+    ]
+    assert not any(main.is_supported_video_link(url) for url in rejected)
+
+
+def test_chat_rejects_external_links_without_calling_downloaders(monkeypatch):
+    def must_not_run(url):
+        raise AssertionError("external link must not be sent to a downloader")
+    monkeypatch.setattr(main, "download_with_failover", must_not_run)
+    request = main.ChatRequest(message="Tải giúp tôi https://example.com/private-page")
+    result = main.chat_endpoint(request, "", "", "")
+    assert result["type"] == "unsupported_link"
+    assert "không được hỗ trợ" in result["message"]
+
