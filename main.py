@@ -37,8 +37,13 @@ gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 HTTP = requests.Session()
 HTTP.headers.update({"User-Agent": "Mozilla/5.0 (compatible; AIVideoServer/0.2)"})
 
+class ChatHistoryItem(BaseModel):
+    role: str = Field(min_length=1, max_length=20)
+    content: str = Field(min_length=1, max_length=2000)
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
+    history: list[ChatHistoryItem] = Field(default_factory=list, max_length=12)
 
 class DownloadRequest(BaseModel):
     url: str = Field(min_length=8, max_length=4096)
@@ -561,9 +566,15 @@ def chat_endpoint(
     # automatically when their keys are configured in the hosting environment.
     if request_gemini_client:
         try:
+            conversation = []
+            for turn in req.history[-12:]:
+                role = "Chủ nhân" if turn.role == "user" else "Trợ lý MuChi"
+                if turn.role in ("user", "assistant"):
+                    conversation.append(f"{role}: {turn.content[:2000]}")
+            conversation.append(f"Chủ nhân: {message}")
             response = request_gemini_client.models.generate_content(
                 model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-                contents=message,
+                contents="\\n".join(conversation),
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
                     temperature=0.3,
@@ -602,6 +613,11 @@ def chat_endpoint(
                     "model": model_name,
                     "messages": [
                         {"role": "system", "content": system_prompt},
+                        *[
+                            {"role": turn.role, "content": turn.content[:2000]}
+                            for turn in req.history[-12:]
+                            if turn.role in ("user", "assistant")
+                        ],
                         {"role": "user", "content": message},
                     ],
                     "temperature": 0.3,
