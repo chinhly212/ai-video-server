@@ -574,7 +574,7 @@ def chat_endpoint(
             conversation.append(f"Chủ nhân: {message}")
             response = request_gemini_client.models.generate_content(
                 model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-                contents="\\n".join(conversation),
+                contents="\n".join(conversation),
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
                     temperature=0.3,
