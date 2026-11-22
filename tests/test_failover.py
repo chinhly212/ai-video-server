@@ -199,3 +199,22 @@ def test_download_proxy_falls_back_when_cdn_returns_409(monkeypatch):
     )
     assert main.download_proxy_endpoint(request) is marker
 
+def test_chat_gives_step_by_step_douyin_and_kuaishou_login_guidance():
+    for platform in ("Douyin", "Kuaishou"):
+        request = main.ChatRequest(message=f"Cách đăng nhập {platform} trong app?")
+        result = main.chat_endpoint(request, "", "", "")
+        assert result["type"] == "text"
+        assert "Đăng nhập" in result["message"]
+        assert "lưu phiên" in result["message"]
+        assert "Thêm tài khoản" in result["message"]
+        assert "Quét ngay" in result["message"]
+
+
+def test_chat_explains_channel_scan_workflow():
+    request = main.ChatRequest(message="Phần theo dõi kênh và quét video hoạt động như nào?")
+    result = main.chat_endpoint(request, "", "", "")
+    assert result["type"] == "text"
+    assert "Quét ngay" in result["message"]
+    assert "bỏ qua video trùng" in result["message"]
+    assert "Thông báo hệ thống" in result["message"]
+
