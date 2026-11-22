@@ -3,3 +3,4 @@ uvicorn
 google-genai
 requests
 yt-dlp
+playwright==1.61.0
