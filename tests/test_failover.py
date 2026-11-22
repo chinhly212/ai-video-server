@@ -178,3 +178,24 @@ def test_chat_refuses_harmful_sensitive_requests():
     assert result["type"] == "text"
     assert "không thể hỗ trợ" in result["message"]
 
+def test_download_proxy_falls_back_when_cdn_returns_409(monkeypatch):
+    class FakeUpstream:
+        status_code = 409
+        is_redirect = False
+        headers = {"Content-Type": "text/plain"}
+        def close(self):
+            return None
+
+    marker = object()
+    monkeypatch.setattr(main, "validate_video_url", lambda value: value)
+    monkeypatch.setattr(main, "validate_public_media_url", lambda value: value)
+    monkeypatch.setattr(main.HTTP, "get", lambda *args, **kwargs: FakeUpstream())
+    monkeypatch.setattr(main, "download_via_ytdlp", lambda source: marker)
+
+    request = main.VideoProxyRequest(
+        video_url="https://cdn.example/video.mp4",
+        source_url="https://www.tiktok.com/@creator/video/123",
+        provider="test",
+    )
+    assert main.download_proxy_endpoint(request) is marker
+
