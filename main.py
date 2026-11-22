@@ -734,7 +734,7 @@ def chat_endpoint(
             ),
         }
 
-    if re.search(r"\b(api|gemini|openrouter|deepseek|mô hình ai|nhà cung cấp mô hình)\b", normalized_message):
+    if re.search(r"\b(api|gemini|openrouter|deepseek|mô hình|nhà cung cấp mô hình)\b", normalized_message):
         return {
             "type": "text",
             "message": "Tôi không chia sẻ thông tin cấu hình kỹ thuật nội bộ. Chủ nhân có thể quản lý kết nối trợ lý trong phần Cài đặt.",
