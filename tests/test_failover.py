@@ -63,6 +63,36 @@ def test_all_fallbacks_are_attempted_for_tiktok(monkeypatch):
     assert called == ["GenDownload", "WebDownloader", "TikTok Worker", "yt-dlp"]
 
 
+def test_kuaishou_ssr_resolves_mp4_from_share_page(monkeypatch):
+    class FakeResponse:
+        text = '<title>Test Kuaishou</title><video src="https://cdn.example/video_hd15.mp4?token=abc"></video>'
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(main.HTTP, "get", lambda *args, **kwargs: FakeResponse())
+    result = main.provider_kuaishou("https://www.kuaishou.com/short-video/abc123")
+    assert result["status"] == "success"
+    assert result["provider"] == "Kuaishou SSR"
+    assert result["video_url"] == "https://cdn.example/video_hd15.mp4?token=abc"
+
+
+def test_kuaishou_provider_is_added_only_for_kuaishou(monkeypatch):
+    monkeypatch.setattr(main, "validate_video_url", lambda value: value)
+    called = []
+    def fail(name):
+        def inner(url):
+            called.append(name)
+            raise RuntimeError("offline")
+        return inner
+    monkeypatch.setattr(main, "provider_gendownload", fail("GenDownload"))
+    monkeypatch.setattr(main, "provider_webdownloader", fail("WebDownloader"))
+    monkeypatch.setattr(main, "provider_tiktok_worker", fail("TikTok Worker"))
+    monkeypatch.setattr(main, "provider_kuaishou", fail("Kuaishou SSR"))
+    monkeypatch.setattr(main, "provider_ytdlp", fail("yt-dlp"))
+    main.download_with_failover("https://www.kuaishou.com/short-video/abc123")
+    assert called == ["GenDownload", "WebDownloader", "Kuaishou SSR", "yt-dlp"]
+
+
 def test_rejects_non_http_and_unknown_hosts():
     for url in ("file:///etc/passwd", "https://example.com/video.mp4"):
         try:
