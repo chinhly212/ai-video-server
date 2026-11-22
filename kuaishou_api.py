@@ -51,14 +51,26 @@ class ProfileScanRequest(BaseModel):
     max_pages: int = Field(default=5, ge=1, le=10)
 
 def _user_id_from_url(value: str) -> str:
-    parsed = urlparse(value.strip())
+    raw = value.strip()
+    # Accept a bare Kuaishou user ID as well as a canonical profile URL.
+    # Do not interpret arbitrary URLs or share links as account IDs.
+    if re.fullmatch(r"[A-Za-z0-9_-]{3,128}", raw):
+        return raw
+
+    parsed = urlparse(raw)
     if parsed.scheme not in ("http", "https") or parsed.hostname not in (
         "kuaishou.com", "www.kuaishou.com", "m.kuaishou.com"
     ):
-        raise HTTPException(status_code=400, detail="Chỉ chấp nhận URL hồ sơ Kuaishou chính thức.")
-    match = re.search(r"/profile/([A-Za-z0-9_-]+)", parsed.path)
+        raise HTTPException(
+            status_code=400,
+            detail="Nhập ID tài khoản hoặc URL hồ sơ Kuaishou dạng https://www.kuaishou.com/profile/ID."
+        )
+    match = re.search(r"/profile/([A-Za-z0-9_-]{3,128})(?:/|$)", parsed.path)
     if not match:
-        raise HTTPException(status_code=400, detail="URL không chứa mã hồ sơ /profile/ hợp lệ.")
+        raise HTTPException(
+            status_code=400,
+            detail="URL chưa có mã hồ sơ /profile/. Liên kết chia sẻ ngắn chưa được hỗ trợ."
+        )
     return match.group(1)
 
 def _cookie_pairs(raw: str) -> list[dict[str, Any]]:
