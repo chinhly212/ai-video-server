@@ -502,6 +502,7 @@ def download_via_ytdlp(source_url: str):
         "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
         "format": "best[ext=mp4]/best",
         "merge_output_format": "mp4",
+        "recodevideo": "mp4",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
@@ -592,8 +593,13 @@ def download_proxy_endpoint(req: VideoProxyRequest):
                 upstream = None
                 break
             content_type = upstream.headers.get("Content-Type", "application/octet-stream").lower()
-            if "text/html" in content_type or "application/json" in content_type:
-                direct_error = f"CDN trả nội dung không phải video ({content_type})."
+            if (
+                "text/html" in content_type
+                or "application/json" in content_type
+                or "video/webm" in content_type
+                or "video/x-matroska" in content_type
+            ):
+                direct_error = f"CDN trả định dạng không phù hợp để lưu MP4 ({content_type})."
                 upstream.close()
                 upstream = None
                 break
