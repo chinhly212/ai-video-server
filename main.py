@@ -29,7 +29,7 @@ app.add_middleware(
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 HTTP = requests.Session()
 HTTP.headers.update({"User-Agent": "Mozilla/5.0 (compatible; AIVideoServer/0.2)"})
@@ -266,13 +266,13 @@ def health():
         "version": app.version,
         "gemini_configured": bool(GEMINI_API_KEY),
         "openrouter_configured": bool(OPENROUTER_API_KEY),
-        "groq_configured": bool(GROQ_API_KEY),
-        "ai_ready": bool(GEMINI_API_KEY or OPENROUTER_API_KEY or GROQ_API_KEY),
+        "deepseek_configured": bool(DEEPSEEK_API_KEY),
+        "ai_ready": bool(GEMINI_API_KEY or OPENROUTER_API_KEY or DEEPSEEK_API_KEY),
         "ai_providers": [
             name for name, configured in (
                 ("Gemini", GEMINI_API_KEY),
                 ("OpenRouter", OPENROUTER_API_KEY),
-                ("Groq", GROQ_API_KEY),
+                ("DeepSeek", DEEPSEEK_API_KEY),
             ) if configured
         ],
         "download_providers": ["GenDownload", "WebDownloader", "TikTok Downloader Worker (TikTok only)", "yt-dlp"],
@@ -300,7 +300,7 @@ def validate_api_endpoint(
     api_key: str = Header(default="", alias="X-Provider-Api-Key"),
 ):
     provider = str(req.get("provider", "")).strip().lower()
-    if provider not in ("gemini", "openrouter", "groq"):
+    if provider not in ("gemini", "openrouter", "deepseek"):
         raise HTTPException(status_code=400, detail="Nhà cung cấp chưa được hỗ trợ.")
     if not api_key.strip():
         raise HTTPException(status_code=400, detail="API key đang trống.")
@@ -320,7 +320,7 @@ def validate_api_endpoint(
             )
         else:
             response = HTTP.get(
-                "https://api.groq.com/openai/v1/models",
+                "https://api.deepseek.com/models",
                 headers={"Authorization": f"Bearer {api_key.strip()}"},
                 timeout=(8, 20),
             )
@@ -351,7 +351,7 @@ def chat_endpoint(
     req: ChatRequest,
     gemini_api_key: str = Header(default="", alias="X-Gemini-Api-Key"),
     openrouter_api_key: str = Header(default="", alias="X-OpenRouter-Api-Key"),
-    groq_api_key: str = Header(default="", alias="X-Groq-Api-Key"),
+    deepseek_api_key: str = Header(default="", alias="X-DeepSeek-Api-Key"),
 ):
     message = req.message.strip()
     if not message:
@@ -376,7 +376,7 @@ def chat_endpoint(
     failures = []
     request_gemini_key = gemini_api_key.strip() or GEMINI_API_KEY
     request_openrouter_key = openrouter_api_key.strip() or OPENROUTER_API_KEY
-    request_groq_key = groq_api_key.strip() or GROQ_API_KEY
+    request_deepseek_key = deepseek_api_key.strip() or DEEPSEEK_API_KEY
     request_gemini_client = genai.Client(api_key=request_gemini_key) if request_gemini_key else None
 
     # Primary model: Gemini. Optional OpenAI-compatible providers are tried
@@ -407,10 +407,10 @@ def chat_endpoint(
             os.getenv("OPENROUTER_MODEL", "openrouter/free"),
         ),
         (
-            "Groq",
-            request_groq_key,
-            "https://api.groq.com/openai/v1/chat/completions",
-            os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            "DeepSeek",
+            request_deepseek_key,
+            "https://api.deepseek.com/chat/completions",
+            os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
         ),
     ]
     for provider_name, api_key, endpoint, model_name in compatible_providers:
@@ -444,7 +444,7 @@ def chat_endpoint(
             log.warning("%s failed: %s", provider_name, str(exc)[:240])
             failures.append(f"{provider_name}: {str(exc)[:180]}")
 
-    if not (request_gemini_key or request_openrouter_key or request_groq_key):
+    if not (request_gemini_key or request_openrouter_key or request_deepseek_key):
         message_text = (
             "Chưa cấu hình API mô hình AI. Chủ máy chủ cần thêm ít nhất một khóa "
             "GEMINI_API_KEY, OPENROUTER_API_KEY hoặc GROQ_API_KEY trong biến môi trường Render. "
