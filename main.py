@@ -5,6 +5,9 @@ import ipaddress
 import socket
 import logging
 import time
+import tempfile
+import shutil
+import mimetypes
 from urllib.parse import urlparse
 from typing import Optional
 
@@ -12,7 +15,8 @@ import requests
 import yt_dlp
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse, FileResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
@@ -61,14 +65,69 @@ ALLOWED_HOST_SUFFIXES = (
     "twitter.com", "redd.it", "reddit.com", "bilibili.com", "b23.tv",
 )
 
+def is_supported_video_link(raw_url: str) -> bool:
+    try:
+        parsed = urlparse(raw_url.strip())
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return False
+        host = parsed.hostname.lower().rstrip(".")
+        path = parsed.path.lower()
+        query = parsed.query.lower()
+
+        def host_is(domain: str) -> bool:
+            return host == domain or host.endswith("." + domain)
+
+        if host_is("tiktok.com"):
+            if host in ("vm.tiktok.com", "vt.tiktok.com"):
+                return path not in ("", "/")
+            return bool(re.search(r"/@[^/]+/video/[^/?]+|/t/[^/]+|/v/[^/]+", path))
+        if host_is("tiktokv.com"):
+            return bool(path and path != "/")
+        if host_is("douyin.com") or host_is("iesdouyin.com"):
+            if host == "v.douyin.com":
+                return path not in ("", "/")
+            return bool(re.search(r"/video/[^/?]+|/share/video/[^/?]+", path))
+        if host_is("kuaishou.com") or host_is("gifshow.com"):
+            if host in ("v.kuaishou.com", "v.gifshow.com"):
+                return path not in ("", "/")
+            return bool(re.search(r"/short-video/[^/?]+|/fw/photo/[^/?]+|/photo/[^/?]+|/s/[^/?]+|/share/[^/?]+", path))
+        if host == "youtu.be":
+            return path not in ("", "/")
+        if host_is("youtube.com"):
+            return (path == "/watch" and bool(re.search(r"(?:^|&)v=[^&]+", query))) or bool(
+                re.search(r"/(?:shorts|live|embed)/[^/?]+", path)
+            )
+        if host_is("instagram.com"):
+            return bool(re.search(r"/(?:reel|p|tv)/[^/?]+", path))
+        if host == "fb.watch":
+            return path not in ("", "/")
+        if host_is("facebook.com"):
+            return bool(re.search(r"/(?:watch|videos|reel|share/v|share/r)(?:/|$)", path))
+        if host_is("threads.net"):
+            return bool(re.search(r"/@[^/]+/post/[^/?]+", path))
+        if host in ("x.com", "www.x.com", "twitter.com", "www.twitter.com") or host_is("twitter.com"):
+            return bool(re.search(r"/[^/]+/status/[^/?]+", path))
+        if host == "redd.it":
+            return path not in ("", "/")
+        if host_is("reddit.com"):
+            return bool(re.search(r"/comments/[^/?]+", path))
+        if host == "b23.tv":
+            return path not in ("", "/")
+        if host_is("bilibili.com"):
+            return bool(re.search(r"/video/(?:bv[0-9a-z]+|av[0-9]+)", path))
+        return False
+    except Exception:
+        return False
+
+
 def validate_video_url(raw_url: str) -> str:
     value = raw_url.strip()
     parsed = urlparse(value)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise HTTPException(status_code=400, detail="URL phải bắt đầu bằng http:// hoặc https://")
+        raise HTTPException(status_code=400, detail="Đường dẫn video không hợp lệ.")
+    if not is_supported_video_link(value):
+        raise HTTPException(status_code=400, detail="MuChi chỉ nhận link video hợp lệ từ nền tảng được hỗ trợ.")
     host = parsed.hostname.lower().rstrip(".")
-    if not any(host == d or host.endswith("." + d) for d in ALLOWED_HOST_SUFFIXES):
-        raise HTTPException(status_code=400, detail="Tên miền này chưa nằm trong danh sách nền tảng hỗ trợ.")
     try:
         infos = socket.getaddrinfo(host, None)
         for info in infos:
@@ -79,8 +138,9 @@ def validate_video_url(raw_url: str) -> str:
         pass
     return value
 
+
 def extract_video_id_url(text: str) -> Optional[str]:
-    match = re.search(r"https?://[^\s<>]+", text)
+    match = re.search(r"https?://[^\\s<>]+", text)
     return match.group(0).rstrip(".,);]") if match else None
 
 def choose_gen_download_format(data: dict) -> Optional[dict]:
@@ -427,11 +487,52 @@ def validate_public_media_url(raw_url: str) -> str:
     return value
 
 
+def download_via_ytdlp(source_url: str):
+    temp_dir = tempfile.mkdtemp(prefix="muchiai-video-")
+    options = {
+        "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
+        "format": "best[ext=mp4]/best",
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 30,
+        "retries": 3,
+        "fragment_retries": 3,
+        "overwrites": True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(options) as downloader:
+            info = downloader.extract_info(source_url, download=True)
+            expected = downloader.prepare_filename(info)
+        candidates = [
+            os.path.join(temp_dir, name)
+            for name in os.listdir(temp_dir)
+            if os.path.isfile(os.path.join(temp_dir, name)) and not name.endswith((".part", ".ytdl"))
+        ]
+        if expected and os.path.isfile(expected):
+            video_path = expected
+        elif candidates:
+            video_path = max(candidates, key=os.path.getsize)
+        else:
+            raise RuntimeError("Bộ tải dự phòng không tạo được dữ liệu video.")
+        if os.path.getsize(video_path) <= 0:
+            raise RuntimeError("Bộ tải dự phòng trả về video rỗng.")
+        media_type = mimetypes.guess_type(video_path)[0] or "video/mp4"
+        return FileResponse(
+            video_path,
+            media_type=media_type,
+            filename="MuChi-video.mp4",
+            background=BackgroundTask(shutil.rmtree, temp_dir, ignore_errors=True),
+        )
+    except Exception:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
+
 @app.post("/download/proxy")
 def download_proxy_endpoint(req: VideoProxyRequest):
-    # The Android client must not fetch short-lived provider/CDN links directly:
-    # some CDNs reject mobile requests with HTTP 409. Fetch the media from the
-    # same server that resolved the link and stream it back to the device.
+    # Always validate the public platform URL before touching a CDN URL.
     validate_video_url(req.source_url)
     media_url = validate_public_media_url(req.video_url)
     source_host = (urlparse(req.source_url).hostname or "").lower()
@@ -454,6 +555,7 @@ def download_proxy_endpoint(req: VideoProxyRequest):
         "Referer": referer,
     }
     upstream = None
+    direct_error = None
     current_url = media_url
     try:
         for _ in range(6):
@@ -468,51 +570,64 @@ def download_proxy_endpoint(req: VideoProxyRequest):
             if upstream.is_redirect:
                 location = upstream.headers.get("Location")
                 upstream.close()
+                upstream = None
                 if not location:
-                    raise HTTPException(status_code=502, detail="CDN chuyển hướng nhưng không cung cấp URL đích.")
+                    direct_error = "CDN chuyển hướng nhưng không cung cấp URL đích."
+                    break
                 from urllib.parse import urljoin
                 current_url = urljoin(current_url, location)
                 continue
-            break
-        else:
-            raise HTTPException(status_code=502, detail="CDN chuyển hướng quá nhiều lần.")
-        if upstream is None:
-            raise HTTPException(status_code=502, detail="Không nhận được phản hồi từ CDN.")
-        if upstream.status_code < 200 or upstream.status_code >= 300:
-            status = upstream.status_code
-            detail = f"CDN từ chối gửi file video (HTTP {status})."
-            upstream.close()
-            raise HTTPException(status_code=502, detail=detail)
-        content_type = upstream.headers.get("Content-Type", "application/octet-stream").lower()
-        if "text/html" in content_type or "application/json" in content_type:
-            upstream.close()
-            raise HTTPException(status_code=502, detail=f"CDN trả về nội dung không phải video ({content_type}).")
-
-        def stream_media():
-            try:
-                for chunk in upstream.iter_content(chunk_size=256 * 1024):
-                    if chunk:
-                        yield chunk
-            finally:
+            if upstream.status_code < 200 or upstream.status_code >= 300:
+                direct_error = f"CDN từ chối gửi file video (HTTP {upstream.status_code})."
                 upstream.close()
+                upstream = None
+                break
+            content_type = upstream.headers.get("Content-Type", "application/octet-stream").lower()
+            if "text/html" in content_type or "application/json" in content_type:
+                direct_error = f"CDN trả nội dung không phải video ({content_type})."
+                upstream.close()
+                upstream = None
+                break
 
-        response_headers = {"X-Video-Provider": req.provider[:120]}
-        content_length = upstream.headers.get("Content-Length")
-        if content_length and content_length.isdigit():
-            response_headers["Content-Length"] = content_length
-        return StreamingResponse(
-            stream_media(),
-            media_type=content_type,
-            headers=response_headers,
-        )
-    except HTTPException:
-        raise
+            def stream_media():
+                try:
+                    for chunk in upstream.iter_content(chunk_size=256 * 1024):
+                        if chunk:
+                            yield chunk
+                finally:
+                    upstream.close()
+
+            response_headers = {"X-Video-Provider": req.provider[:120]}
+            content_length = upstream.headers.get("Content-Length")
+            if content_length and content_length.isdigit():
+                response_headers["Content-Length"] = content_length
+            return StreamingResponse(stream_media(), media_type=content_type, headers=response_headers)
+        else:
+            direct_error = "CDN chuyển hướng quá nhiều lần."
+    except HTTPException as exc:
+        if exc.status_code < 500:
+            if upstream is not None:
+                upstream.close()
+            raise
+        direct_error = str(exc.detail)
     except requests.RequestException as exc:
+        direct_error = f"{type(exc).__name__}: {str(exc)[:160]}"
+    finally:
         if upstream is not None:
             upstream.close()
-        log.warning("Video proxy failed: %s", str(exc)[:300])
-        raise HTTPException(status_code=502, detail=f"Máy chủ không lấy được file từ CDN: {type(exc).__name__}: {str(exc)[:180]}")
 
+    # A CDN may reject the server's direct request (for example HTTP 409).
+    # Retry by letting yt-dlp download the original public platform page on
+    # the server, then stream the finished file and clean it after delivery.
+    log.warning("Direct CDN transfer failed; trying yt-dlp fallback: %s", (direct_error or "unknown")[:240])
+    try:
+        return download_via_ytdlp(req.source_url)
+    except Exception as fallback_error:
+        log.warning("yt-dlp proxy fallback failed: %s", str(fallback_error)[:240])
+        raise HTTPException(
+            status_code=502,
+            detail="Không thể tải video từ nguồn hiện tại. Hãy thử lại sau hoặc kiểm tra video còn công khai hay không.",
+        ) from fallback_error
 
 @app.post("/download")
 def download_endpoint(req: DownloadRequest):
@@ -532,29 +647,77 @@ def chat_endpoint(
     if not message:
         raise HTTPException(status_code=400, detail="Tin nhắn không được để trống.")
 
-    video_url = extract_video_id_url(message)
-    if video_url:
+    urls = re.findall(r"https?://[^\\s<>]+", message)
+    if urls:
+        if len(urls) != 1:
+            return {
+                "type": "unsupported_link",
+                "message": "MuChi chỉ nhận một link video hợp lệ mỗi lần. Chủ nhân gửi lại một link video từ nền tảng được hỗ trợ nhé.",
+            }
+        video_url = urls[0].rstrip(".,);]")
+        if not is_supported_video_link(video_url):
+            return {
+                "type": "unsupported_link",
+                "message": "Đường dẫn này không được hỗ trợ. MuChi chỉ nhận link video hợp lệ từ các nền tảng video được hỗ trợ.",
+            }
         result = download_with_failover(video_url)
         if result.get("status") == "success":
             return {
                 "type": "video",
-                "message": "Đã tìm thấy luồng video. Hãy tải xuống và lưu nội dung bạn có quyền sử dụng.",
+                "message": "Tôi đã tìm thấy video.",
                 "data": result,
             }
-        return {"type": "text", "message": result.get("message"), "errors": result.get("provider_errors", [])}
+        return {
+            "type": "text",
+            "message": "Xin lỗi, hiện tại tôi chưa tìm được video từ đường dẫn này.",
+            "errors": result.get("provider_errors", []),
+        }
 
     system_prompt = (
-        "Bạn là trợ lý AI riêng của ứng dụng MuChi. Người đang trò chuyện là CHỦ NHÂN "
-        "của bạn; hãy tôn trọng, hỗ trợ tận tâm và gọi người đó là 'chủ nhân' khi phù hợp. "
-        "Không tự bịa tên, tuổi, địa chỉ hoặc thông tin cá nhân của chủ nhân. "
-        "Trả lời bằng tiếng Việt tự nhiên như một cuộc trò chuyện thật, ấm áp nhưng không "
-        "dài dòng; đi thẳng vào câu hỏi, đúng trọng tâm, dùng từ dễ hiểu và không lặp lại "
-        "câu hỏi. Nếu chưa đủ dữ kiện thì hỏi đúng một câu ngắn để làm rõ. "
-        "Không để lộ tên nhà cung cấp API, dịch vụ tải, máy chủ, endpoint, mã HTTP, "
-        "stack trace hoặc chi tiết triển khai nội bộ cho người dùng cuối. "
-        "Không bịa rằng đã thực hiện một hành động. Chỉ xác nhận tải/lưu video thành công "
-        "khi ứng dụng đã báo kết quả lưu thành công; nếu mới tìm thấy liên kết video, "
-        "chỉ nói đã tìm thấy video, không nói đã tải xong."
+        "Bạn là trợ lý AI riêng của ứng dụng MuChi. Chủ sở hữu ứng dụng là Chính Ly. "
+        "Chỉ nêu tên Chính Ly khi người dùng hỏi trực tiếp về chủ app, người tạo hoặc chủ sở hữu; "
+        "không tự nhắc tên này trong cuộc trò chuyện bình thường. Người đang trò chuyện là chủ nhân; "
+        "gọi 'chủ nhân' tự nhiên khi phù hợp, không lạm dụng. "
+        "Trả lời bằng tiếng Việt tự nhiên, ấm áp, ngắn gọn, đúng trọng tâm. Không bịa thông tin. "
+        "Nếu thiếu dữ kiện, hỏi một câu ngắn để làm rõ. "
+        "KIẾN THỨC CHÍNH XÁC VỀ ỨNG DỤNG MUCHI: "
+        "MuChi có các khu vực Trang chủ, Công việc, AI, Bộ nhớ và Cài đặt. "
+        "Trang chủ hiển thị trạng thái hệ thống, tiến trình công việc và thông báo lỗi; "
+        "người dùng có thể xem chi tiết sự cố, đánh dấu đã hiểu hoặc xóa thông báo. "
+        "Khu vực Công việc hiển thị hàng đợi video và các trạng thái đang chạy, đang chờ, hoàn thành, lỗi, tạm dừng; "
+        "có nút Quét ngay, Tiếp tục tất cả, lọc công việc và điều khiển tạm dừng/tiếp tục từng công việc. "
+        "Cài đặt quản lý tài khoản nguồn Douyin và Kuaishou, bật/tắt hoặc xóa tài khoản, "
+        "đăng nhập nền tảng, cấp quyền thông báo/lưu trữ và mở cấu hình trợ lý. "
+        "Muốn thêm tài khoản theo dõi: đăng nhập nền tảng trước, vào Cài đặt > Thêm tài khoản, "
+        "chọn Douyin hoặc Kuaishou, nhập ID hoặc URL hồ sơ, xác minh thông tin rồi bật tài khoản. "
+        "Đăng nhập Douyin: Cài đặt > Đăng nhập nền tảng > Douyin; đăng nhập trong trang chính thức "
+        "mở bên trong ứng dụng, sau đó bấm 'Đã đăng nhập – lưu phiên'. "
+        "Đăng nhập Kuaishou làm tương tự bằng nút Kuaishou. MuChi lưu cookie phiên trên điện thoại; "
+        "người dùng tự nhập mật khẩu trên trang chính thức, ứng dụng không yêu cầu gửi mật khẩu vào chat. "
+        "Cách quét: bật tài khoản nguồn đã đăng nhập, vào Công việc > Quét ngay; ứng dụng lấy video mới "
+        "từ các tài khoản đang bật, bỏ qua video trùng, lưu video mới vào danh sách và tạo công việc xử lý. "
+        "Quá trình tự động đi qua các bước được cấu hình như tải video, phân tích/tối ưu, nhận diện giọng nói, "
+        "dịch, tạo giọng đọc, phụ đề, ghép, xuất và xác minh; một số bước có thể không chạy nếu tác vụ "
+        "hoặc cấu hình không yêu cầu. Nếu lỗi, xem Thông báo hệ thống ở Trang chủ rồi thử tiếp tục công việc. "
+        "Khu vực Bộ nhớ hiển thị dung lượng điện thoại, video đã xử lý và các chức năng kết nối Google Drive "
+        "để tải lên, tải xuống, làm mới hoặc xóa tệp Drive. "
+        "Trợ lý AI hỗ trợ trò chuyện, giải thích tính năng và hướng dẫn thao tác. "
+        "Chức năng tải link video chỉ nhận link video hợp lệ từ các nền tảng sau: TikTok, Douyin, Kuaishou, "
+        "YouTube, Instagram, Facebook, Threads, X/Twitter, Reddit và Bilibili. "
+        "Không khẳng định mọi video đều tải được: video riêng tư, bị giới hạn vùng, hết hạn hoặc nền tảng đổi cấu trúc "
+        "có thể không xử lý được. Tài khoản quét kênh hiện chỉ hỗ trợ Douyin và Kuaishou. "
+        "KHÔNG tiết lộ bất kỳ tên API, nhà cung cấp mô hình AI, số lượng mô hình, endpoint, máy chủ, "
+        "dịch vụ tải, mã HTTP, log hoặc chi tiết triển khai nội bộ. Nếu bị hỏi về cấu hình kỹ thuật bí mật, "
+        "chỉ hướng dẫn người dùng vào mục Cài đặt phù hợp, không nêu tên nhà cung cấp hay khóa. "
+        "QUY TẮC LINK: nếu người dùng gửi URL không phải link video hợp lệ thuộc danh sách hỗ trợ, "
+        "từ chối ngắn gọn; không mở, không phân tích, không chuyển tiếp URL đó tới công cụ hoặc dịch vụ ngoài. "
+        "Không được chấp nhận nhiều link trong cùng một yêu cầu. "
+        "AN TOÀN: từ chối ngắn gọn các yêu cầu nhạy cảm xâm phạm quyền riêng tư, đánh cắp thông tin, "
+        "vượt bảo vệ tài khoản, lừa đảo, xâm nhập trái phép, tạo mã độc hoặc gây hại. "
+        "Không yêu cầu người dùng cung cấp mật khẩu, mã OTP, cookie hoặc khóa bí mật trong chat. "
+        "Không để lộ tên nhà cung cấp API, dịch vụ tải, máy chủ, endpoint, mã HTTP, stack trace hoặc chi tiết nội bộ. "
+        "Không bịa rằng đã thực hiện hành động. Với link video, ứng dụng sẽ tự báo 'Tôi đã tìm thấy video' "
+        "khi đã tìm được nguồn; chỉ xác nhận đã tải và lưu khi ứng dụng xác nhận lưu thành công."
     )
     failures = []
     request_gemini_key = gemini_api_key.strip() or GEMINI_API_KEY
@@ -640,9 +803,8 @@ def chat_endpoint(
 
     if not (request_gemini_key or request_openrouter_key or request_deepseek_key):
         message_text = (
-            "Chưa cấu hình API mô hình AI. Chủ máy chủ cần thêm ít nhất một khóa "
-            "GEMINI_API_KEY, OPENROUTER_API_KEY hoặc DEEPSEEK_API_KEY trong biến môi trường Render. "
-            "Chức năng tải video vẫn hoạt động độc lập."
+            "Trợ lý AI chưa được kết nối. Chủ nhân hãy kiểm tra mục kết nối trợ lý trong Cài đặt. "
+            "Chức năng tải video vẫn có thể hoạt động độc lập."
         )
     else:
         message_text = (
