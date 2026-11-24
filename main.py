@@ -8,7 +8,7 @@ import time
 import tempfile
 import shutil
 import mimetypes
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 from typing import Optional
 
 import requests
@@ -58,7 +58,8 @@ class DouyinProfileScanRequest(BaseModel):
     sec_uid: str = Field(min_length=12, max_length=256)
     cookie: str = Field(default="", max_length=16000)
     since_timestamp: int = Field(ge=0)
-    max_items: int = Field(default=100, ge=1, le=100)
+    max_items: int = Field(default=20, ge=1, le=20)
+    cursor: str = Field(default="0", min_length=1, max_length=64)
 
 class VideoProxyRequest(BaseModel):
     video_url: str = Field(min_length=8, max_length=8192)
@@ -461,6 +462,11 @@ def _parse_douyin_profile_feed(status: int, payload) -> list[dict]:
     return videos
 
 
+def _douyin_feed_request_cursor(response_url: str) -> str:
+    values = parse_qs(urlparse(response_url).query).get("max_cursor") or ["0"]
+    return str(values[0])
+
+
 def _filter_douyin_profile_videos(collected: dict, since_timestamp: int, max_items: int) -> list[dict]:
     """Apply the requested publication cutoff and result limit to captured videos."""
     videos = []
@@ -529,9 +535,11 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
     feed_responses = 0
     valid_feed_responses = 0
     response_errors = []
+    next_cursor = None
+    has_more = False
 
     def capture_profile_feed(response):
-        nonlocal feed_responses, valid_feed_responses
+        nonlocal feed_responses, valid_feed_responses, next_cursor, has_more
         response_path = urlparse(response.url).path
         if "aweme" not in response_path:
             return
@@ -541,10 +549,20 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
         )
         if "/aweme/v1/web/aweme/post/" not in response_path:
             return
+        request_cursor = _douyin_feed_request_cursor(response.url)
+        if request_cursor != str(req.cursor):
+            return
         feed_responses += 1
         try:
             payload = response.json()
             videos = _parse_douyin_profile_feed(response.status, payload)
+            next_cursor = str(payload.get("max_cursor") or "") or None
+            page_has_older_videos = any(
+                video.get("published_at") is not None
+                and video["published_at"] < req.since_timestamp
+                for video in videos
+            )
+            has_more = bool(int(payload.get("has_more") or 0)) and not page_has_older_videos
             valid_feed_responses += 1
             log.info(
                 "Douyin profile feed parsed keys=%s aweme_count=%s has_more=%s max_cursor_present=%s",
@@ -597,15 +615,15 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
                 )
                 stagnant_rounds = 0
                 previous_count = 0
-                for _ in range(12):
-                    if len(collected) >= req.max_items:
+                for _ in range(20):
+                    if valid_feed_responses > 0 or len(collected) >= req.max_items:
                         break
                     page.mouse.wheel(0, 2400)
-                    page.wait_for_timeout(1800)
+                    page.wait_for_timeout(1500)
                     current_count = len(collected)
                     stagnant_rounds = stagnant_rounds + 1 if current_count == previous_count else 0
                     previous_count = current_count
-                    if stagnant_rounds >= 3:
+                    if stagnant_rounds >= 5:
                         break
             finally:
                 context.close()
@@ -636,6 +654,8 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
         "videos": videos,
         "video_count": len(videos),
         "feed_responses": feed_responses,
+        "has_more": has_more and bool(next_cursor),
+        "next_cursor": next_cursor if has_more else None,
     }
 
 @app.get("/providers")

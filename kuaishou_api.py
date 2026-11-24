@@ -48,8 +48,9 @@ SIGN_CAPTURE_SCRIPT = r"""
 class ProfileScanRequest(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
     cookie: str = Field(min_length=8, max_length=16000)
-    max_pages: int = Field(default=5, ge=1, le=10)
+    max_pages: int = Field(default=1, ge=1, le=1)
     since_timestamp: int | None = Field(default=None, ge=0)
+    cursor: str = Field(default="", max_length=256)
 
 def _user_id_from_url(value: str) -> str:
     raw = value.strip()
@@ -161,13 +162,14 @@ def _profile_scan(
     cookie: str,
     max_pages: int,
     since_timestamp: int | None = None,
+    initial_cursor: str = "",
 ) -> dict:
     cookie_pairs = _cookie_pairs(cookie)
     user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     videos: list[dict] = []
     seen: set[str] = set()
     pages_checked = 0
-    cursor = ""
+    cursor = initial_cursor
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -286,7 +288,7 @@ def _profile_scan(
 def scan_profile_videos(request: ProfileScanRequest):
     user_id = _user_id_from_url(request.url)
     try:
-        return _profile_scan(user_id, request.cookie, request.max_pages, request.since_timestamp)
+        return _profile_scan(user_id, request.cookie, request.max_pages, request.since_timestamp, request.cursor)
     except HTTPException:
         raise
     except Exception as exc:
