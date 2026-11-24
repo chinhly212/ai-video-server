@@ -462,6 +462,11 @@ def _parse_douyin_profile_feed(status: int, payload) -> list[dict]:
     return videos
 
 
+def _douyin_feed_request_cursor(response_url: str) -> str:
+    values = parse_qs(urlparse(response_url).query).get("max_cursor") or ["0"]
+    return str(values[0])
+
+
 def _filter_douyin_profile_videos(collected: dict, since_timestamp: int, max_items: int) -> list[dict]:
     """Apply the requested publication cutoff and result limit to captured videos."""
     videos = []
@@ -544,15 +549,20 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
         )
         if "/aweme/v1/web/aweme/post/" not in response_path:
             return
-        request_cursor = (parse_qs(urlparse(response.url).query).get("max_cursor") or ["0"])[0]
-        if str(request_cursor) != str(req.cursor):
+        request_cursor = _douyin_feed_request_cursor(response.url)
+        if request_cursor != str(req.cursor):
             return
         feed_responses += 1
         try:
             payload = response.json()
             videos = _parse_douyin_profile_feed(response.status, payload)
             next_cursor = str(payload.get("max_cursor") or "") or None
-            has_more = bool(int(payload.get("has_more") or 0))
+            page_has_older_videos = any(
+                video.get("published_at") is not None
+                and video["published_at"] < req.since_timestamp
+                for video in videos
+            )
+            has_more = bool(int(payload.get("has_more") or 0)) and not page_has_older_videos
             valid_feed_responses += 1
             log.info(
                 "Douyin profile feed parsed keys=%s aweme_count=%s has_more=%s max_cursor_present=%s",
