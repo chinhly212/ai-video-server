@@ -296,3 +296,40 @@ def test_douyin_profile_navigation_timeout_is_recoverable():
     assert main._open_douyin_profile_page(
         FakePage(), "https://www.douyin.com/user/MS4wLjAB1234567890"
     ) is False
+
+
+def test_douyin_feed_parser_normalizes_video_entries():
+    payload = {"aweme_list": [{
+        "aweme_id": "12345",
+        "create_time": 1795305600,
+        "desc": "Video mới",
+        "share_url": "https://www.douyin.com/video/12345",
+    }], "has_more": 0}
+    result = main._parse_douyin_profile_feed(200, payload)
+    assert result == [{
+        "id": "12345",
+        "url": "https://www.douyin.com/video/12345",
+        "title": "Video mới",
+        "description": "Video mới",
+        "published_at": 1795305600000,
+    }]
+
+
+def test_douyin_feed_parser_accepts_a_valid_empty_profile():
+    assert main._parse_douyin_profile_feed(200, {"aweme_list": []}) == []
+
+
+def test_douyin_feed_parser_rejects_missing_or_malformed_aweme_list():
+    import pytest
+    with pytest.raises(ValueError, match="missing aweme_list"):
+        main._parse_douyin_profile_feed(200, {"status_code": 0})
+    with pytest.raises(ValueError, match="not a list"):
+        main._parse_douyin_profile_feed(200, {"aweme_list": {}})
+
+
+def test_douyin_feed_parser_rejects_http_errors_and_non_object_json():
+    import pytest
+    with pytest.raises(ValueError, match="HTTP 403"):
+        main._parse_douyin_profile_feed(403, {"aweme_list": []})
+    with pytest.raises(ValueError, match="not a JSON object"):
+        main._parse_douyin_profile_feed(200, [])
