@@ -52,6 +52,14 @@ class ChatRequest(BaseModel):
 class DownloadRequest(BaseModel):
     url: str = Field(min_length=8, max_length=4096)
 
+
+
+class DouyinProfileScanRequest(BaseModel):
+    sec_uid: str = Field(min_length=12, max_length=256)
+    cookie: str = Field(default="", max_length=16000)
+    since_timestamp: int = Field(ge=0)
+    max_items: int = Field(default=100, ge=1, le=100)
+
 class VideoProxyRequest(BaseModel):
     video_url: str = Field(min_length=8, max_length=8192)
     source_url: str = Field(min_length=8, max_length=4096)
@@ -416,6 +424,73 @@ def health():
 @app.get("/health")
 def health_alias():
     return health()
+
+
+@app.post("/douyin/profile/videos")
+def douyin_profile_videos(req: DouyinProfileScanRequest):
+    """Fetch a Douyin user's recent posts on the server's current yt-dlp extractor."""
+    sec_uid = req.sec_uid.strip()
+    if not re.fullmatch(r"MS4wLjAB[A-Za-z0-9_-]{10,240}", sec_uid):
+        raise HTTPException(status_code=400, detail="Mã sec_uid Douyin không hợp lệ.")
+    profile_url = "https://www.douyin.com/user/" + sec_uid
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "extract_flat": "in_playlist",
+        "playlistend": req.max_items,
+        "socket_timeout": 30,
+        "retries": 3,
+        "extractor_retries": 3,
+        "ignoreerrors": True,
+        "noplaylist": False,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+            "Referer": "https://www.douyin.com/",
+        },
+    }
+    if req.cookie.strip():
+        options["http_headers"]["Cookie"] = req.cookie.strip()
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(profile_url, download=False)
+    except Exception as exc:
+        log.warning("Douyin profile extraction failed for %s: %s", sec_uid[:18], exc)
+        raise HTTPException(status_code=502, detail=f"Máy chủ chưa lấy được danh sách video Douyin: {str(exc)[:300]}")
+    if not info:
+        raise HTTPException(status_code=502, detail="Douyin không trả dữ liệu danh sách video.")
+    entries = info.get("entries") or []
+    videos = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        video_id = str(item.get("id") or "").strip()
+        if not video_id:
+            continue
+        timestamp = item.get("timestamp") or item.get("release_timestamp")
+        if timestamp is None and item.get("upload_date"):
+            try:
+                timestamp = int(time.mktime(time.strptime(item["upload_date"], "%Y%m%d")))
+            except (TypeError, ValueError, OverflowError):
+                timestamp = None
+        if timestamp is not None:
+            timestamp = int(timestamp)
+            if timestamp < 100_000_000_000:
+                timestamp *= 1000
+        videos.append({
+            "id": video_id,
+            "url": item.get("webpage_url") or item.get("url") or f"https://www.douyin.com/video/{video_id}",
+            "title": item.get("title") or "",
+            "description": item.get("description") or "",
+            "published_at": timestamp,
+        })
+    return {
+        "status": "success",
+        "platform": "DOUYIN",
+        "profile_id": sec_uid,
+        "videos": videos,
+        "video_count": len(videos),
+    }
 
 @app.get("/providers")
 def providers():
