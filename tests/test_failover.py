@@ -268,3 +268,31 @@ def test_kuaishou_profile_graphql_returns_following_and_video_counts():
     assert result["follower_count"] == 1200
     assert result["following_count"] == 87
     assert result["video_count"] == 300
+
+
+def test_douyin_profile_navigation_waits_for_commit_not_domcontentloaded():
+    calls = []
+
+    class FakePage:
+        def goto(self, url, **kwargs):
+            calls.append((url, kwargs))
+
+    assert main._open_douyin_profile_page(
+        FakePage(), "https://www.douyin.com/user/MS4wLjAB1234567890"
+    ) is True
+    assert calls == [(
+        "https://www.douyin.com/user/MS4wLjAB1234567890",
+        {"wait_until": "commit", "timeout": 45000},
+    )]
+
+
+def test_douyin_profile_navigation_timeout_is_recoverable():
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+    class FakePage:
+        def goto(self, url, **kwargs):
+            raise PlaywrightTimeoutError("navigation timed out")
+
+    assert main._open_douyin_profile_page(
+        FakePage(), "https://www.douyin.com/user/MS4wLjAB1234567890"
+    ) is False
