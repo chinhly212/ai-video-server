@@ -428,72 +428,131 @@ def health_alias():
 
 @app.post("/douyin/profile/videos")
 def douyin_profile_videos(req: DouyinProfileScanRequest):
-    """Fetch a Douyin user's recent posts on the server's current yt-dlp extractor."""
+    """Read profile-post data from the real Douyin page in Chromium.
+
+    The page itself creates Douyin's changing request signatures. We observe its
+    own profile-feed responses instead of passing a profile URL to yt-dlp.
+    """
+    from playwright.sync_api import sync_playwright
+
     sec_uid = req.sec_uid.strip()
     if not re.fullmatch(r"MS4wLjAB[A-Za-z0-9_-]{10,240}", sec_uid):
         raise HTTPException(status_code=400, detail="Mã sec_uid Douyin không hợp lệ.")
-    profile_url = "https://www.douyin.com/user/" + sec_uid
-    options = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "extract_flat": "in_playlist",
-        "playlistend": req.max_items,
-        "socket_timeout": 30,
-        "retries": 3,
-        "extractor_retries": 3,
-        "ignoreerrors": True,
-        "noplaylist": False,
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
-            "Referer": "https://www.douyin.com/",
-        },
-    }
-    if req.cookie.strip():
-        options["http_headers"]["Cookie"] = req.cookie.strip()
+
+    user_agent = (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    )
+    cookie_pairs = []
+    for part in req.cookie.split(";"):
+        if "=" not in part:
+            continue
+        name, value = part.strip().split("=", 1)
+        if re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", name) and value:
+            cookie_pairs.append({
+                "name": name, "value": value, "domain": ".douyin.com",
+                "path": "/", "secure": True,
+            })
+
+    collected = {}
+    feed_responses = 0
+    response_errors = []
+
+    def capture_profile_feed(response):
+        nonlocal feed_responses
+        if "/aweme/v1/web/aweme/post/" not in response.url:
+            return
+        feed_responses += 1
+        try:
+            payload = response.json()
+            items = payload.get("aweme_list") or []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                video_id = str(item.get("aweme_id") or item.get("id") or "").strip()
+                if not video_id:
+                    continue
+                stamp = item.get("create_time")
+                try:
+                    published_at = int(stamp) * 1000 if stamp is not None else None
+                except (TypeError, ValueError):
+                    published_at = None
+                collected[video_id] = {
+                    "id": video_id,
+                    "url": item.get("share_url") or f"https://www.douyin.com/video/{video_id}",
+                    "title": item.get("desc") or "",
+                    "description": item.get("desc") or "",
+                    "published_at": published_at,
+                }
+        except Exception as exc:
+            response_errors.append(type(exc).__name__)
+
     try:
-        with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(profile_url, download=False)
-    except Exception as exc:
-        log.warning("Douyin profile extraction failed for %s: %s", sec_uid[:18], exc)
-        raise HTTPException(status_code=502, detail=f"Máy chủ chưa lấy được danh sách video Douyin: {str(exc)[:300]}")
-    if not info:
-        raise HTTPException(status_code=502, detail="Douyin không trả dữ liệu danh sách video.")
-    entries = info.get("entries") or []
-    videos = []
-    for item in entries:
-        if not isinstance(item, dict):
-            continue
-        video_id = str(item.get("id") or "").strip()
-        if not video_id:
-            continue
-        timestamp = item.get("timestamp") or item.get("release_timestamp")
-        if timestamp is None and item.get("upload_date"):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent=user_agent,
+                locale="zh-CN",
+                viewport={"width": 1365, "height": 900},
+            )
+            if cookie_pairs:
+                context.add_cookies(cookie_pairs)
+            page = context.new_page()
+            page.on("response", capture_profile_feed)
             try:
-                timestamp = int(time.mktime(time.strptime(item["upload_date"], "%Y%m%d")))
-            except (TypeError, ValueError, OverflowError):
-                timestamp = None
-        if timestamp is not None:
-            timestamp = int(timestamp)
-            if timestamp < 100_000_000_000:
-                timestamp *= 1000
-            if timestamp < req.since_timestamp:
+                page.goto(
+                    "https://www.douyin.com/user/" + sec_uid,
+                    wait_until="domcontentloaded",
+                    timeout=60000,
+                )
+                page.wait_for_timeout(5000)
+                stagnant_rounds = 0
+                previous_count = 0
+                for _ in range(12):
+                    if len(collected) >= req.max_items:
+                        break
+                    page.mouse.wheel(0, 2400)
+                    page.wait_for_timeout(1800)
+                    current_count = len(collected)
+                    stagnant_rounds = stagnant_rounds + 1 if current_count == previous_count else 0
+                    previous_count = current_count
+                    if stagnant_rounds >= 3:
+                        break
+            finally:
+                context.close()
+                browser.close()
+    except Exception as exc:
+        log.exception("Douyin browser profile scan failed for %s", sec_uid[:18])
+        raise HTTPException(
+            status_code=502,
+            detail=f"Không mở/quét được trang Douyin: {type(exc).__name__}: {str(exc)[:180]}",
+        ) from exc
+
+    videos = []
+    for item in collected.values():
+        timestamp = item["published_at"]
+        if timestamp is None:
+            if req.since_timestamp > 0:
                 continue
-        elif req.since_timestamp > 0:
+        elif timestamp < req.since_timestamp:
             continue
-        videos.append({
-            "id": video_id,
-            "url": item.get("webpage_url") or item.get("url") or f"https://www.douyin.com/video/{video_id}",
-            "title": item.get("title") or "",
-            "description": item.get("description") or "",
-            "published_at": timestamp,
-        })
+        videos.append(item)
+    videos.sort(key=lambda item: item.get("published_at") or 0, reverse=True)
+    videos = videos[:req.max_items]
+
+    if not videos and feed_responses == 0:
+        detail = "Trang Douyin không phát sinh phản hồi danh sách video. Hãy kiểm tra cookie đăng nhập hoặc thử lại sau."
+        if response_errors:
+            detail += " Không đọc được một số phản hồi dữ liệu."
+        raise HTTPException(status_code=502, detail=detail)
+
     return {
         "status": "success",
         "platform": "DOUYIN",
         "profile_id": sec_uid,
         "videos": videos,
         "video_count": len(videos),
+        "feed_responses": feed_responses,
     }
 
 @app.get("/providers")
