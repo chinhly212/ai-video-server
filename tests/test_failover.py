@@ -333,3 +333,32 @@ def test_douyin_feed_parser_rejects_http_errors_and_non_object_json():
         main._parse_douyin_profile_feed(403, {"aweme_list": []})
     with pytest.raises(ValueError, match="not a JSON object"):
         main._parse_douyin_profile_feed(200, [])
+
+
+def test_douyin_video_filter_applies_timestamp_cutoff_and_sorts_newest_first():
+    collected = {
+        "old": {"id": "old", "published_at": 1000},
+        "newer": {"id": "newer", "published_at": 3000},
+        "newest": {"id": "newest", "published_at": 4000},
+        "unknown": {"id": "unknown", "published_at": None},
+    }
+    result = main._filter_douyin_profile_videos(collected, 2000, 10)
+    assert [item["id"] for item in result] == ["newest", "newer"]
+
+
+def test_douyin_video_filter_keeps_unknown_timestamps_when_no_cutoff():
+    collected = {
+        "known": {"id": "known", "published_at": 1000},
+        "unknown": {"id": "unknown", "published_at": None},
+    }
+    result = main._filter_douyin_profile_videos(collected, 0, 10)
+    assert [item["id"] for item in result] == ["known", "unknown"]
+
+
+def test_douyin_video_filter_respects_max_items_after_sorting():
+    collected = {
+        str(i): {"id": str(i), "published_at": i * 1000}
+        for i in range(1, 6)
+    }
+    result = main._filter_douyin_profile_videos(collected, 0, 2)
+    assert [item["id"] for item in result] == ["5", "4"]
