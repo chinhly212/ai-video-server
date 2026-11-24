@@ -477,6 +477,10 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
             timestamp = int(timestamp)
             if timestamp < 100_000_000_000:
                 timestamp *= 1000
+            if timestamp < req.since_timestamp:
+                continue
+        elif req.since_timestamp > 0:
+            continue
         videos.append({
             "id": video_id,
             "url": item.get("webpage_url") or item.get("url") or f"https://www.douyin.com/video/{video_id}",
