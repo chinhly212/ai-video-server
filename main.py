@@ -460,6 +460,21 @@ def _parse_douyin_profile_feed(status: int, payload) -> list[dict]:
     return videos
 
 
+def _filter_douyin_profile_videos(collected: dict, since_timestamp: int, max_items: int) -> list[dict]:
+    """Apply the requested publication cutoff and result limit to captured videos."""
+    videos = []
+    for item in collected.values():
+        timestamp = item.get("published_at")
+        if timestamp is None:
+            if since_timestamp > 0:
+                continue
+        elif timestamp < since_timestamp:
+            continue
+        videos.append(item)
+    videos.sort(key=lambda item: item.get("published_at") or 0, reverse=True)
+    return videos[:max_items]
+
+
 def _open_douyin_profile_page(page, profile_url: str) -> bool:
     """Start profile navigation without waiting for the full Douyin document.
 
@@ -601,17 +616,9 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
             detail=f"Không mở/quét được trang Douyin: {type(exc).__name__}: {str(exc)[:180]}",
         ) from exc
 
-    videos = []
-    for item in collected.values():
-        timestamp = item["published_at"]
-        if timestamp is None:
-            if req.since_timestamp > 0:
-                continue
-        elif timestamp < req.since_timestamp:
-            continue
-        videos.append(item)
-    videos.sort(key=lambda item: item.get("published_at") or 0, reverse=True)
-    videos = videos[:req.max_items]
+    videos = _filter_douyin_profile_videos(
+        collected, req.since_timestamp, req.max_items
+    )
 
     if valid_feed_responses == 0:
         detail = "Douyin không trả về phản hồi danh sách video hợp lệ. Hãy kiểm tra phiên đăng nhập hoặc thử lại sau."
