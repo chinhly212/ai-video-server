@@ -520,7 +520,15 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
                     timeout=60000,
                 )
                 page.wait_for_timeout(5000)
-                page_text = (page.locator("body").inner_text(timeout=5000) or "").lower()
+                try:
+                    page_text = (page.locator("body").inner_text(timeout=1500) or "").lower()
+                except Exception as page_text_error:
+                    # Page text is diagnostic only; it must never abort video collection.
+                    page_text = ""
+                    log.warning(
+                        "Douyin profile diagnostic text unavailable: %s",
+                        type(page_text_error).__name__,
+                    )
                 log.info(
                     "Douyin profile page loaded title=%r final_url_path=%s login_hint=%s verify_hint=%s",
                     page.title(),
