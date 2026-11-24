@@ -460,12 +460,26 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
 
     def capture_profile_feed(response):
         nonlocal feed_responses
-        if "/aweme/v1/web/aweme/post/" not in response.url:
+        response_path = urlparse(response.url).path
+        if "aweme" not in response_path:
+            return
+        log.info(
+            "Douyin profile response path=%s status=%s content_type=%s",
+            response_path, response.status, response.headers.get("content-type", "")
+        )
+        if "/aweme/v1/web/aweme/post/" not in response_path:
             return
         feed_responses += 1
         try:
             payload = response.json()
             items = payload.get("aweme_list") or []
+            log.info(
+                "Douyin profile feed parsed keys=%s aweme_count=%s has_more=%s max_cursor_present=%s",
+                sorted(payload.keys()) if isinstance(payload, dict) else [],
+                len(items) if isinstance(items, list) else -1,
+                payload.get("has_more") if isinstance(payload, dict) else None,
+                bool(payload.get("max_cursor")) if isinstance(payload, dict) else False,
+            )
             for item in items:
                 if not isinstance(item, dict):
                     continue
@@ -506,6 +520,14 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
                     timeout=60000,
                 )
                 page.wait_for_timeout(5000)
+                page_text = (page.locator("body").inner_text(timeout=5000) or "").lower()
+                log.info(
+                    "Douyin profile page loaded title=%r final_url_path=%s login_hint=%s verify_hint=%s",
+                    page.title(),
+                    urlparse(page.url).path,
+                    any(word in page_text for word in ("登录", "login", "扫码")),
+                    any(word in page_text for word in ("验证", "验证码", "captcha", "安全验证")),
+                )
                 stagnant_rounds = 0
                 previous_count = 0
                 for _ in range(12):
