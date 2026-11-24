@@ -268,3 +268,97 @@ def test_kuaishou_profile_graphql_returns_following_and_video_counts():
     assert result["follower_count"] == 1200
     assert result["following_count"] == 87
     assert result["video_count"] == 300
+
+
+def test_douyin_profile_navigation_waits_for_commit_not_domcontentloaded():
+    calls = []
+
+    class FakePage:
+        def goto(self, url, **kwargs):
+            calls.append((url, kwargs))
+
+    assert main._open_douyin_profile_page(
+        FakePage(), "https://www.douyin.com/user/MS4wLjAB1234567890"
+    ) is True
+    assert calls == [(
+        "https://www.douyin.com/user/MS4wLjAB1234567890",
+        {"wait_until": "commit", "timeout": 45000},
+    )]
+
+
+def test_douyin_profile_navigation_timeout_is_recoverable():
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+    class FakePage:
+        def goto(self, url, **kwargs):
+            raise PlaywrightTimeoutError("navigation timed out")
+
+    assert main._open_douyin_profile_page(
+        FakePage(), "https://www.douyin.com/user/MS4wLjAB1234567890"
+    ) is False
+
+
+def test_douyin_feed_parser_normalizes_video_entries():
+    payload = {"aweme_list": [{
+        "aweme_id": "12345",
+        "create_time": 1795305600,
+        "desc": "Video mới",
+        "share_url": "https://www.douyin.com/video/12345",
+    }], "has_more": 0}
+    result = main._parse_douyin_profile_feed(200, payload)
+    assert result == [{
+        "id": "12345",
+        "url": "https://www.douyin.com/video/12345",
+        "title": "Video mới",
+        "description": "Video mới",
+        "published_at": 1795305600000,
+    }]
+
+
+def test_douyin_feed_parser_accepts_a_valid_empty_profile():
+    assert main._parse_douyin_profile_feed(200, {"aweme_list": []}) == []
+
+
+def test_douyin_feed_parser_rejects_missing_or_malformed_aweme_list():
+    import pytest
+    with pytest.raises(ValueError, match="missing aweme_list"):
+        main._parse_douyin_profile_feed(200, {"status_code": 0})
+    with pytest.raises(ValueError, match="not a list"):
+        main._parse_douyin_profile_feed(200, {"aweme_list": {}})
+
+
+def test_douyin_feed_parser_rejects_http_errors_and_non_object_json():
+    import pytest
+    with pytest.raises(ValueError, match="HTTP 403"):
+        main._parse_douyin_profile_feed(403, {"aweme_list": []})
+    with pytest.raises(ValueError, match="not a JSON object"):
+        main._parse_douyin_profile_feed(200, [])
+
+
+def test_douyin_video_filter_applies_timestamp_cutoff_and_sorts_newest_first():
+    collected = {
+        "old": {"id": "old", "published_at": 1000},
+        "newer": {"id": "newer", "published_at": 3000},
+        "newest": {"id": "newest", "published_at": 4000},
+        "unknown": {"id": "unknown", "published_at": None},
+    }
+    result = main._filter_douyin_profile_videos(collected, 2000, 10)
+    assert [item["id"] for item in result] == ["newest", "newer"]
+
+
+def test_douyin_video_filter_keeps_unknown_timestamps_when_no_cutoff():
+    collected = {
+        "known": {"id": "known", "published_at": 1000},
+        "unknown": {"id": "unknown", "published_at": None},
+    }
+    result = main._filter_douyin_profile_videos(collected, 0, 10)
+    assert [item["id"] for item in result] == ["known", "unknown"]
+
+
+def test_douyin_video_filter_respects_max_items_after_sorting():
+    collected = {
+        str(i): {"id": str(i), "published_at": i * 1000}
+        for i in range(1, 6)
+    }
+    result = main._filter_douyin_profile_videos(collected, 0, 2)
+    assert [item["id"] for item in result] == ["5", "4"]

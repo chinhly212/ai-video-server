@@ -426,6 +426,77 @@ def health_alias():
     return health()
 
 
+def _parse_douyin_profile_feed(status: int, payload) -> list[dict]:
+    """Validate a Douyin profile-feed response and normalize its video entries."""
+    if status < 200 or status >= 300:
+        raise ValueError(f"Douyin feed returned HTTP {status}")
+    if not isinstance(payload, dict):
+        raise ValueError("Douyin feed payload is not a JSON object")
+    if "aweme_list" not in payload:
+        raise ValueError("Douyin feed payload is missing aweme_list")
+    items = payload["aweme_list"]
+    if not isinstance(items, list):
+        raise ValueError("Douyin feed aweme_list is not a list")
+
+    videos = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        video_id = str(item.get("aweme_id") or item.get("id") or "").strip()
+        if not video_id:
+            continue
+        stamp = item.get("create_time")
+        try:
+            published_at = int(stamp) * 1000 if stamp is not None else None
+        except (TypeError, ValueError):
+            published_at = None
+        description = item.get("desc") or ""
+        videos.append({
+            "id": video_id,
+            "url": item.get("share_url") or f"https://www.douyin.com/video/{video_id}",
+            "title": description,
+            "description": description,
+            "published_at": published_at,
+        })
+    return videos
+
+
+def _filter_douyin_profile_videos(collected: dict, since_timestamp: int, max_items: int) -> list[dict]:
+    """Apply the requested publication cutoff and result limit to captured videos."""
+    videos = []
+    for item in collected.values():
+        timestamp = item.get("published_at")
+        if timestamp is None:
+            if since_timestamp > 0:
+                continue
+        elif timestamp < since_timestamp:
+            continue
+        videos.append(item)
+    videos.sort(key=lambda item: item.get("published_at") or 0, reverse=True)
+    return videos[:max_items]
+
+
+def _open_douyin_profile_page(page, profile_url: str) -> bool:
+    """Start profile navigation without waiting for the full Douyin document.
+
+    Douyin keeps long-running page resources open, so waiting for DOM readiness
+    can time out even after the browser has received the initial document.
+    A navigation timeout is treated as recoverable: the caller still inspects
+    any feed responses captured while the page was loading.
+    """
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+    try:
+        page.goto(profile_url, wait_until="commit", timeout=45000)
+        return True
+    except PlaywrightTimeoutError:
+        log.warning(
+            "Douyin profile navigation did not reach commit within 45s; "
+            "continuing to inspect any captured feed responses"
+        )
+        return False
+
+
 @app.post("/douyin/profile/videos")
 def douyin_profile_videos(req: DouyinProfileScanRequest):
     """Read profile-post data from the real Douyin page in Chromium.
@@ -456,10 +527,11 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
 
     collected = {}
     feed_responses = 0
+    valid_feed_responses = 0
     response_errors = []
 
     def capture_profile_feed(response):
-        nonlocal feed_responses
+        nonlocal feed_responses, valid_feed_responses
         response_path = urlparse(response.url).path
         if "aweme" not in response_path:
             return
@@ -472,34 +544,23 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
         feed_responses += 1
         try:
             payload = response.json()
-            items = payload.get("aweme_list") or []
+            videos = _parse_douyin_profile_feed(response.status, payload)
+            valid_feed_responses += 1
             log.info(
                 "Douyin profile feed parsed keys=%s aweme_count=%s has_more=%s max_cursor_present=%s",
-                sorted(payload.keys()) if isinstance(payload, dict) else [],
-                len(items) if isinstance(items, list) else -1,
-                payload.get("has_more") if isinstance(payload, dict) else None,
-                bool(payload.get("max_cursor")) if isinstance(payload, dict) else False,
+                sorted(payload.keys()),
+                len(payload["aweme_list"]),
+                payload.get("has_more"),
+                bool(payload.get("max_cursor")),
             )
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                video_id = str(item.get("aweme_id") or item.get("id") or "").strip()
-                if not video_id:
-                    continue
-                stamp = item.get("create_time")
-                try:
-                    published_at = int(stamp) * 1000 if stamp is not None else None
-                except (TypeError, ValueError):
-                    published_at = None
-                collected[video_id] = {
-                    "id": video_id,
-                    "url": item.get("share_url") or f"https://www.douyin.com/video/{video_id}",
-                    "title": item.get("desc") or "",
-                    "description": item.get("desc") or "",
-                    "published_at": published_at,
-                }
+            for video in videos:
+                collected[video["id"]] = video
         except Exception as exc:
             response_errors.append(type(exc).__name__)
+            log.warning(
+                "Douyin profile feed response rejected status=%s error=%s",
+                response.status, type(exc).__name__,
+            )
 
     try:
         with sync_playwright() as playwright:
@@ -514,11 +575,8 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
             page = context.new_page()
             page.on("response", capture_profile_feed)
             try:
-                page.goto(
-                    "https://www.douyin.com/user/" + sec_uid,
-                    wait_until="domcontentloaded",
-                    timeout=60000,
-                )
+                profile_url = "https://www.douyin.com/user/" + sec_uid
+                navigation_committed = _open_douyin_profile_page(page, profile_url)
                 page.wait_for_timeout(5000)
                 try:
                     page_text = (page.locator("body").inner_text(timeout=1500) or "").lower()
@@ -530,7 +588,8 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
                         type(page_text_error).__name__,
                     )
                 log.info(
-                    "Douyin profile page loaded title=%r final_url_path=%s login_hint=%s verify_hint=%s",
+                    "Douyin profile page state navigation_committed=%s title=%r final_url_path=%s login_hint=%s verify_hint=%s",
+                    navigation_committed,
                     page.title(),
                     urlparse(page.url).path,
                     any(word in page_text for word in ("登录", "login", "扫码")),
@@ -558,22 +617,16 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
             detail=f"Không mở/quét được trang Douyin: {type(exc).__name__}: {str(exc)[:180]}",
         ) from exc
 
-    videos = []
-    for item in collected.values():
-        timestamp = item["published_at"]
-        if timestamp is None:
-            if req.since_timestamp > 0:
-                continue
-        elif timestamp < req.since_timestamp:
-            continue
-        videos.append(item)
-    videos.sort(key=lambda item: item.get("published_at") or 0, reverse=True)
-    videos = videos[:req.max_items]
+    videos = _filter_douyin_profile_videos(
+        collected, req.since_timestamp, req.max_items
+    )
 
-    if not videos and feed_responses == 0:
-        detail = "Trang Douyin không phát sinh phản hồi danh sách video. Hãy kiểm tra cookie đăng nhập hoặc thử lại sau."
+    if valid_feed_responses == 0:
+        detail = "Douyin không trả về phản hồi danh sách video hợp lệ. Hãy kiểm tra phiên đăng nhập hoặc thử lại sau."
+        if feed_responses:
+            detail += " Máy chủ đã nhận phản hồi nhưng dữ liệu bị từ chối hoặc không đúng định dạng."
         if response_errors:
-            detail += " Không đọc được một số phản hồi dữ liệu."
+            detail += " Một số phản hồi bị lỗi khi đọc."
         raise HTTPException(status_code=502, detail=detail)
 
     return {
