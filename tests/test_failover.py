@@ -362,3 +362,36 @@ def test_douyin_video_filter_respects_max_items_after_sorting():
     }
     result = main._filter_douyin_profile_videos(collected, 0, 2)
     assert [item["id"] for item in result] == ["5", "4"]
+
+
+
+def test_douyin_feed_request_cursor_defaults_to_first_page():
+    assert main._douyin_feed_request_cursor("https://www.douyin.com/aweme/v1/web/aweme/post/?sec_user_id=abc") == "0"
+
+
+def test_douyin_feed_request_cursor_reads_pagination_cursor():
+    assert main._douyin_feed_request_cursor(
+        "https://www.douyin.com/aweme/v1/web/aweme/post/?max_cursor=1795305600&count=20"
+    ) == "1795305600"
+
+
+def test_douyin_scan_request_limits_each_batch_to_twenty():
+    request = main.DouyinProfileScanRequest(
+        sec_uid="MS4wLjAB1234567890",
+        since_timestamp=0,
+        cursor="12345",
+        max_items=20,
+    )
+    assert request.max_items == 20
+    assert request.cursor == "12345"
+
+
+def test_kuaishou_scan_request_is_one_page_per_call():
+    import kuaishou_api
+    request = kuaishou_api.ProfileScanRequest(
+        url="https://www.kuaishou.com/profile/3xz63mn6fngqtiq",
+        cookie="did=12345678",
+        cursor="pcursor-next",
+    )
+    assert request.max_pages == 1
+    assert request.cursor == "pcursor-next"
