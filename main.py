@@ -397,8 +397,7 @@ def download_with_failover(raw_url: str) -> dict:
             log.warning("Provider failed: %s", message)
     return {
         "status": "error",
-        "message": "Tất cả nguồn tải hiện không xử lý được liên kết này.",
-        "provider_errors": errors,
+        "message": "Tất cả nguồn tải hiện không xử lý được liên kết này.",        "provider_errors": errors,
     }
 
 @app.get("/")
@@ -424,6 +423,41 @@ def health():
 @app.get("/health")
 def health_alias():
     return health()
+
+
+def _parse_douyin_profile_feed(status: int, payload) -> list[dict]:
+    """Validate a Douyin profile-feed response and normalize its video entries."""
+    if status < 200 or status >= 300:
+        raise ValueError(f"Douyin feed returned HTTP {status}")
+    if not isinstance(payload, dict):
+        raise ValueError("Douyin feed payload is not a JSON object")
+    if "aweme_list" not in payload:
+        raise ValueError("Douyin feed payload is missing aweme_list")
+    items = payload["aweme_list"]
+    if not isinstance(items, list):
+        raise ValueError("Douyin feed aweme_list is not a list")
+
+    videos = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        video_id = str(item.get("aweme_id") or item.get("id") or "").strip()
+        if not video_id:
+            continue
+        stamp = item.get("create_time")
+        try:
+            published_at = int(stamp) * 1000 if stamp is not None else None
+        except (TypeError, ValueError):
+            published_at = None
+        description = item.get("desc") or ""
+        videos.append({
+            "id": video_id,
+            "url": item.get("share_url") or f"https://www.douyin.com/video/{video_id}",
+            "title": description,
+            "description": description,
+            "published_at": published_at,
+        })
+    return videos
 
 
 def _open_douyin_profile_page(page, profile_url: str) -> bool:
@@ -477,10 +511,11 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
 
     collected = {}
     feed_responses = 0
+    valid_feed_responses = 0
     response_errors = []
 
     def capture_profile_feed(response):
-        nonlocal feed_responses
+        nonlocal feed_responses, valid_feed_responses
         response_path = urlparse(response.url).path
         if "aweme" not in response_path:
             return
@@ -493,34 +528,23 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
         feed_responses += 1
         try:
             payload = response.json()
-            items = payload.get("aweme_list") or []
+            videos = _parse_douyin_profile_feed(response.status, payload)
+            valid_feed_responses += 1
             log.info(
                 "Douyin profile feed parsed keys=%s aweme_count=%s has_more=%s max_cursor_present=%s",
-                sorted(payload.keys()) if isinstance(payload, dict) else [],
-                len(items) if isinstance(items, list) else -1,
-                payload.get("has_more") if isinstance(payload, dict) else None,
-                bool(payload.get("max_cursor")) if isinstance(payload, dict) else False,
+                sorted(payload.keys()),
+                len(payload["aweme_list"]),
+                payload.get("has_more"),
+                bool(payload.get("max_cursor")),
             )
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                video_id = str(item.get("aweme_id") or item.get("id") or "").strip()
-                if not video_id:
-                    continue
-                stamp = item.get("create_time")
-                try:
-                    published_at = int(stamp) * 1000 if stamp is not None else None
-                except (TypeError, ValueError):
-                    published_at = None
-                collected[video_id] = {
-                    "id": video_id,
-                    "url": item.get("share_url") or f"https://www.douyin.com/video/{video_id}",
-                    "title": item.get("desc") or "",
-                    "description": item.get("desc") or "",
-                    "published_at": published_at,
-                }
+            for video in videos:
+                collected[video["id"]] = video
         except Exception as exc:
             response_errors.append(type(exc).__name__)
+            log.warning(
+                "Douyin profile feed response rejected status=%s error=%s",
+                response.status, type(exc).__name__,
+            )
 
     try:
         with sync_playwright() as playwright:
@@ -589,10 +613,12 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
     videos.sort(key=lambda item: item.get("published_at") or 0, reverse=True)
     videos = videos[:req.max_items]
 
-    if not videos and feed_responses == 0:
-        detail = "Trang Douyin không phát sinh phản hồi danh sách video. Hãy kiểm tra cookie đăng nhập hoặc thử lại sau."
+    if valid_feed_responses == 0:
+        detail = "Douyin không trả về phản hồi danh sách video hợp lệ. Hãy kiểm tra phiên đăng nhập hoặc thử lại sau."
+        if feed_responses:
+            detail += " Máy chủ đã nhận phản hồi nhưng dữ liệu bị từ chối hoặc không đúng định dạng."
         if response_errors:
-            detail += " Không đọc được một số phản hồi dữ liệu."
+            detail += " Một số phản hồi bị lỗi khi đọc."
         raise HTTPException(status_code=502, detail=detail)
 
     return {
@@ -798,7 +824,6 @@ def download_proxy_endpoint(req: VideoProxyRequest):
                             yield chunk
                 finally:
                     upstream.close()
-
             response_headers = {"X-Video-Provider": req.provider[:120]}
             content_length = upstream.headers.get("Content-Length")
             if content_length and content_length.isdigit():
