@@ -426,6 +426,27 @@ def health_alias():
     return health()
 
 
+def _open_douyin_profile_page(page, profile_url: str) -> bool:
+    """Start profile navigation without waiting for the full Douyin document.
+
+    Douyin keeps long-running page resources open, so waiting for DOM readiness
+    can time out even after the browser has received the initial document.
+    A navigation timeout is treated as recoverable: the caller still inspects
+    any feed responses captured while the page was loading.
+    """
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+    try:
+        page.goto(profile_url, wait_until="commit", timeout=45000)
+        return True
+    except PlaywrightTimeoutError:
+        log.warning(
+            "Douyin profile navigation did not reach commit within 45s; "
+            "continuing to inspect any captured feed responses"
+        )
+        return False
+
+
 @app.post("/douyin/profile/videos")
 def douyin_profile_videos(req: DouyinProfileScanRequest):
     """Read profile-post data from the real Douyin page in Chromium.
@@ -514,11 +535,8 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
             page = context.new_page()
             page.on("response", capture_profile_feed)
             try:
-                page.goto(
-                    "https://www.douyin.com/user/" + sec_uid,
-                    wait_until="domcontentloaded",
-                    timeout=60000,
-                )
+                profile_url = "https://www.douyin.com/user/" + sec_uid
+                navigation_committed = _open_douyin_profile_page(page, profile_url)
                 page.wait_for_timeout(5000)
                 try:
                     page_text = (page.locator("body").inner_text(timeout=1500) or "").lower()
@@ -530,7 +548,8 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
                         type(page_text_error).__name__,
                     )
                 log.info(
-                    "Douyin profile page loaded title=%r final_url_path=%s login_hint=%s verify_hint=%s",
+                    "Douyin profile page state navigation_committed=%s title=%r final_url_path=%s login_hint=%s verify_hint=%s",
+                    navigation_committed,
                     page.title(),
                     urlparse(page.url).path,
                     any(word in page_text for word in ("登录", "login", "扫码")),
