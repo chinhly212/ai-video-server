@@ -397,7 +397,8 @@ def download_with_failover(raw_url: str) -> dict:
             log.warning("Provider failed: %s", message)
     return {
         "status": "error",
-        "message": "Tất cả nguồn tải hiện không xử lý được liên kết này.",        "provider_errors": errors,
+        "message": "Tất cả nguồn tải hiện không xử lý được liên kết này.",
+        "provider_errors": errors,
     }
 
 @app.get("/")
@@ -831,6 +832,7 @@ def download_proxy_endpoint(req: VideoProxyRequest):
                             yield chunk
                 finally:
                     upstream.close()
+
             response_headers = {"X-Video-Provider": req.provider[:120]}
             content_length = upstream.headers.get("Content-Length")
             if content_length and content_length.isdigit():
