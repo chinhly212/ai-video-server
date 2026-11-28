@@ -282,7 +282,7 @@ def test_douyin_profile_navigation_waits_for_commit_not_domcontentloaded():
     ) is True
     assert calls == [(
         "https://www.douyin.com/user/MS4wLjAB1234567890",
-        {"wait_until": "commit", "timeout": 45000},
+        {"wait_until": "commit", "timeout": 25000},
     )]
 
 
@@ -382,7 +382,7 @@ def test_douyin_feed_request_cursor_reads_pagination_cursor():
     ) == "1795305600"
 
 
-def test_douyin_scan_request_limits_each_batch_to_twenty():
+def test_douyin_scan_request_supports_full_channel_archive():
     request = main.DouyinProfileScanRequest(
         sec_uid="MS4wLjAB1234567890",
         since_timestamp=0,
