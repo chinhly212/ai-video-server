@@ -282,7 +282,7 @@ def test_douyin_profile_navigation_waits_for_commit_not_domcontentloaded():
     ) is True
     assert calls == [(
         "https://www.douyin.com/user/MS4wLjAB1234567890",
-        {"wait_until": "commit", "timeout": 25000},
+        {"wait_until": "commit", "timeout": 15000},
     )]
 
 
