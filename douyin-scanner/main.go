@@ -124,6 +124,40 @@ func scan(w http.ResponseWriter, r *http.Request) {
 		HasMore:hasMore, NextCursor:nextCursor,
 	})
 }
+// scanOnePage returns one native Douyin creator-feed page. The Android client
+// requests the next cursor only after it has displayed and stored this page.
+func scanOnePage(ctx context.Context, client douyinWorksClient, profileURL, cursor string, limit int) ([]any, string, bool, error) {
+	if limit < 1 { limit = 20 }
+	if limit > 50 { limit = 50 }
+	result, err := client.GetUserWorkInfo(ctx, profileURL, cursor)
+	if err != nil { return nil, "", false, err }
+	raw, ok := result["aweme_list"].([]any)
+	if !ok {
+		if status, exists := result["status_msg"]; exists {
+			return nil, "", false, fmt.Errorf("Douyin feed rejected request: %v", status)
+		}
+		return nil, "", false, fmt.Errorf("Douyin feed response has no aweme_list")
+	}
+	posts := make([]any, 0, limit)
+	seen := make(map[string]bool)
+	for _, item := range raw {
+		record, ok := item.(map[string]any)
+		if !ok { continue }
+		id := fmt.Sprint(record["aweme_id"])
+		if id == "" || id == "<nil>" { id = fmt.Sprint(record["id"]) }
+		if id == "" || id == "<nil>" || seen[id] { continue }
+		seen[id] = true
+		posts = append(posts, record)
+		if len(posts) >= limit { break }
+	}
+	rawMore := fmt.Sprint(result["has_more"])
+	hasMore := rawMore == "1" || strings.EqualFold(rawMore, "true")
+	nextCursor := fmt.Sprint(result["max_cursor"])
+	if nextCursor == "<nil>" || nextCursor == "" || nextCursor == cursor { nextCursor = "" }
+	if !hasMore || nextCursor == "" { hasMore = false; nextCursor = "" }
+	return posts, nextCursor, hasMore, nil
+}
+
 type douyinWorksClient interface {
 	GetUserWorkInfo(context.Context, string, string) (map[string]any, error)
 }
