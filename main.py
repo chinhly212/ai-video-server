@@ -532,6 +532,53 @@ def _activate_douyin_posts_tab(page) -> Optional[str]:
     return None
 
 
+def _scan_douyin_with_signed_go(req: DouyinProfileScanRequest) -> Optional[dict]:
+    """Use the in-container Go client with the exact cookie from the connected app."""
+    endpoint = "http://127.0.0.1:18081/scan"
+    try:
+        response = requests.post(
+            endpoint,
+            json={
+                "sec_uid": req.sec_uid,
+                "cookie": req.cookie,
+                "max_items": req.max_items,
+            },
+            timeout=(8, 420),
+        )
+    except requests.RequestException as exc:
+        log.warning("Local Go Douyin scanner unavailable: %s", type(exc).__name__)
+        return None
+    try:
+        envelope = response.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail="Bộ quét Douyin trả về dữ liệu không hợp lệ.") from exc
+    if response.status_code != 200 or envelope.get("status") != "success":
+        detail = str(envelope.get("error") or "Bộ quét chữ ký Douyin không lấy được danh sách video.")
+        log.warning("Go Douyin scanner rejected profile: HTTP %s; %s", response.status_code, detail[:180])
+        raise HTTPException(status_code=502, detail=f"Quét Douyin thất bại: {detail[:220]}")
+    raw_videos = envelope.get("videos")
+    if not isinstance(raw_videos, list):
+        raise HTTPException(status_code=502, detail="Bộ quét Douyin không trả danh sách video.")
+    try:
+        videos = _parse_douyin_profile_feed(200, {"aweme_list": raw_videos})
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail="Dữ liệu video Douyin không đúng định dạng.") from exc
+    videos = _filter_douyin_profile_videos(videos_by_id := {item["id"]: item for item in videos}, req.since_timestamp, req.max_items)
+    if not videos:
+        raise HTTPException(status_code=404, detail="Hồ sơ Douyin không có video công khai trong phạm vi yêu cầu.")
+    return {
+        "status": "success",
+        "platform": "DOUYIN",
+        "profile_id": req.sec_uid,
+        "videos": videos,
+        "video_count": len(videos),
+        "feed_responses": 0,
+        "has_more": len(videos) >= req.max_items,
+        "next_cursor": None,
+        "source": "SIGNED_GO_CLIENT",
+    }
+
+
 def _scan_douyin_with_dtk_api(req: DouyinProfileScanRequest) -> Optional[dict]:
     """Use a separately hosted DTK API instance when configured.
 
@@ -721,9 +768,11 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
     The page itself creates Douyin's changing request signatures. We observe its
     own profile-feed responses instead of passing a profile URL to yt-dlp.
     """
-    # Prefer the separately hosted signing/identity engine when configured.
-    # Keep the existing Chromium observer as a fallback for deployments that
-    # have not provisioned that service yet.
+    # Prefer the in-container Go client: it uses the connected account cookie
+    # and signs the creator-post API directly. Keep DTK and Chromium as fallbacks.
+    signed_result = _scan_douyin_with_signed_go(req)
+    if signed_result is not None:
+        return signed_result
     dtk_result = _scan_douyin_with_dtk_api(req)
     if dtk_result is not None:
         return dtk_result
