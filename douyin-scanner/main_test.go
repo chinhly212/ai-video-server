@@ -132,3 +132,19 @@ func TestNormalizeDouyinCookieDoesNotInventUIFID(t *testing.T) {
 	want := "sessionid=abc; ttwid=xyz"
 	if got != want { t.Fatalf("normalized cookie = %q, want %q", got, want) }
 }
+
+
+func TestExtractDouyinUIFIDPrefersCanonicalCookie(t *testing.T) {
+	got := extractDouyinUIFID("UIFID_TEMP=temp-value; sessionid=abc; UIFID=real-value")
+	if got != "real-value" { t.Fatalf("uifid = %q, want real-value", got) }
+}
+
+func TestExtractDouyinUIFIDFallsBackToTemporaryCookie(t *testing.T) {
+	got := extractDouyinUIFID("sessionid=abc; UIFID_TEMP=temp-value")
+	if got != "temp-value" { t.Fatalf("uifid = %q, want temp-value", got) }
+}
+
+func TestExtractDouyinUIFIDMissing(t *testing.T) {
+	got := extractDouyinUIFID("sessionid=abc; ttwid=xyz")
+	if got != "" { t.Fatalf("uifid = %q, want empty", got) }
+}
