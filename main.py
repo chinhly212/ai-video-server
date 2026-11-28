@@ -463,14 +463,15 @@ def _parse_douyin_profile_feed(status: int, payload) -> list[dict]:
 
 
 def _is_douyin_profile_feed_path(response_path: str) -> bool:
-    """Recognize profile-feed endpoint variants across Douyin web API revisions.
+    """Match creator-post feed endpoints, not favorite/detail aweme APIs.
 
-    Douyin has changed the profile-post endpoint path several times. The caller
-    validates the response body (it must contain an aweme_list), so requiring
-    the URL to end in /post incorrectly discards valid profile-feed responses.
+    Douyin versions the web API path (v1, v2, and later), but the creator feed
+    endpoint retains the /web/aweme/post suffix. Matching every path containing
+    "aweme" also captures favorite and detail responses, which are not channel
+    archives and can cause false feed counts.
     """
     normalized = response_path.rstrip("/").lower()
-    return "aweme" in normalized
+    return bool(re.search(r"/aweme/(?:v\d+/)?web/aweme/post$", normalized))
 
 
 def _douyin_feed_request_cursor(response_url: str) -> str:
