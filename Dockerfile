@@ -19,7 +19,7 @@ RUN apt-get update \
     && pip install --no-cache-dir -r requirements.txt \
     && playwright install --with-deps chromium
 
-COPY --from=douyin-builder /out/douyin-scanner /app/douyin-scanner
+COPY --from=douyin-builder /out/douyin-scanner /usr/local/bin/douyin-scanner
 COPY . .
 RUN chmod +x /app/start.sh
 EXPOSE 10000
