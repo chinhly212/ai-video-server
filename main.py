@@ -503,7 +503,7 @@ def _open_douyin_profile_page(page, profile_url: str) -> bool:
         return True
     except PlaywrightTimeoutError:
         log.warning(
-            "Douyin profile navigation did not reach commit within 45s; "
+            "Douyin profile navigation did not reach commit within 25s; "
             "continuing to inspect any captured feed responses"
         )
         return False
@@ -559,6 +559,7 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
     valid_feed_responses = 0
     response_errors = []
     observed_aweme_responses = []
+    observed_aweme_requests = []
     seen_feed_cursors = set()
     page_diagnostics = {
         "navigation_committed": None,
@@ -665,7 +666,7 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
                     "navigation_committed": navigation_committed,
                     "final_path": urlparse(page.url).path[:180],
                     "page_title": (page.title() or "")[:120],
-                    "body_hint": re.sub(r"\\s+", " ", page_text)[:180],
+                    "body_hint": re.sub(r"\s+", " ", page_text)[:180],
                     "posts_tab_activated": activated_tab,
                     "login_hint": any(word in page_text for word in ("登录", "login", "扫码")),
                     "verify_hint": any(word in page_text for word in ("验证", "验证码", "captcha", "安全验证")),
@@ -737,6 +738,9 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
         )
         if page_diagnostics["body_hint"]:
             detail += f" Nội dung trang={page_diagnostics['body_hint']}."
+        if observed_aweme_requests:
+            requested = ", ".join(f"{item['method']} {item['path']}" for item in observed_aweme_requests[:6])
+            detail += f" Yêu cầu aweme đã gửi: {requested}."
         if failed_requests:
             detail += " Yêu cầu lỗi: " + ", ".join(
                 f"{item['path']} ({item['failure']})" for item in failed_requests[:3]
