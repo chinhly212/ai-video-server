@@ -58,7 +58,7 @@ class DouyinProfileScanRequest(BaseModel):
     sec_uid: str = Field(min_length=12, max_length=256)
     cookie: str = Field(default="", max_length=16000)
     since_timestamp: int = Field(ge=0)
-    max_items: int = Field(default=20, ge=1, le=20)
+    max_items: int = Field(default=600, ge=1, le=600)
     cursor: str = Field(default="0", min_length=1, max_length=64)
 
 class VideoProxyRequest(BaseModel):
@@ -542,6 +542,7 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
     valid_feed_responses = 0
     response_errors = []
     observed_aweme_responses = []
+    seen_feed_cursors = set()
     page_diagnostics = {
         "navigation_committed": None,
         "final_path": "",
@@ -570,8 +571,9 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
         if not _is_douyin_profile_feed_path(response_path):
             return
         request_cursor = _douyin_feed_request_cursor(response.url)
-        if request_cursor != str(req.cursor):
+        if request_cursor in seen_feed_cursors:
             return
+        seen_feed_cursors.add(request_cursor)
         feed_responses += 1
         try:
             payload = response.json()
@@ -585,7 +587,8 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
             has_more = bool(int(payload.get("has_more") or 0)) and not page_has_older_videos
             valid_feed_responses += 1
             log.info(
-                "Douyin profile feed parsed keys=%s aweme_count=%s has_more=%s max_cursor_present=%s",
+                "Douyin profile feed parsed cursor=%s keys=%s aweme_count=%s has_more=%s max_cursor_present=%s",
+                request_cursor,
                 sorted(payload.keys()),
                 len(payload["aweme_list"]),
                 payload.get("has_more"),
@@ -619,7 +622,6 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
                 try:
                     page_text = (page.locator("body").inner_text(timeout=1500) or "").lower()
                 except Exception as page_text_error:
-                    # Page text is diagnostic only; it must never abort video collection.
                     page_text = ""
                     log.warning(
                         "Douyin profile diagnostic text unavailable: %s",
@@ -640,16 +642,24 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
                     page_diagnostics["verify_hint"],
                 )
                 stagnant_rounds = 0
-                previous_count = 0
-                for _ in range(12):
-                    if valid_feed_responses > 0 or len(collected) >= req.max_items:
+                previous_count = len(collected)
+                # One browser session collects multiple feed pages. This avoids
+                # launching Chromium again for every 20-video batch from Android.
+                for _ in range(50):
+                    if len(collected) >= req.max_items:
                         break
-                    page.mouse.wheel(0, 2400)
+                    if valid_feed_responses > 0 and not has_more:
+                        break
+                    before_responses = feed_responses
+                    page.mouse.wheel(0, 2600)
                     page.wait_for_timeout(1000)
                     current_count = len(collected)
-                    stagnant_rounds = stagnant_rounds + 1 if current_count == previous_count else 0
+                    if current_count == previous_count and feed_responses == before_responses:
+                        stagnant_rounds += 1
+                    else:
+                        stagnant_rounds = 0
                     previous_count = current_count
-                    if stagnant_rounds >= 5:
+                    if stagnant_rounds >= 6:
                         break
             finally:
                 context.close()
