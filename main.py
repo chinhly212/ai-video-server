@@ -552,7 +552,7 @@ def _scan_douyin_with_dtk_api(req: DouyinProfileScanRequest) -> Optional[dict]:
         params = {
             "sec_user_id": sec_uid,
             "count": 20,
-            "wait": 90,
+            "wait": 30,
             "lang": "en",
         }
         if cursor:
@@ -599,13 +599,50 @@ def _scan_douyin_with_dtk_api(req: DouyinProfileScanRequest) -> Optional[dict]:
             raise HTTPException(status_code=502, detail=detail)
 
         meta = envelope.get("meta") if isinstance(envelope.get("meta"), dict) else {}
+        page = envelope.get("data")
+        if isinstance(page, dict) and page.get("task_id"):
+            task_url = base_url + "/api/v1/tasks/" + str(page["task_id"])
+            deadline = time.monotonic() + 90
+            while time.monotonic() < deadline:
+                time.sleep(2)
+                try:
+                    task_response = HTTP.get(task_url, headers={
+                        "X-API-Key": api_key, "Accept": "application/json"
+                    }, timeout=(12, 30))
+                    task_response.raise_for_status()
+                    task_envelope = task_response.json()
+                except (requests.RequestException, ValueError) as exc:
+                    raise HTTPException(
+                        status_code=502,
+                        detail="Không đọc được tiến trình quét Douyin từ máy chủ API.",
+                    ) from exc
+                task_data = task_envelope.get("data") if isinstance(task_envelope, dict) else None
+                if not isinstance(task_data, dict):
+                    raise HTTPException(status_code=502, detail="Trạng thái tác vụ Douyin không hợp lệ.")
+                state = str(task_data.get("state", "")).lower()
+                if state == "done":
+                    page = task_data.get("data")
+                    meta = task_data.get("result_meta") if isinstance(task_data.get("result_meta"), dict) else {}
+                    break
+                if state == "failed":
+                    task_error = task_data.get("error") if isinstance(task_data.get("error"), dict) else {}
+                    task_code = str(task_error.get("code", ""))
+                    if task_code == "IDENTITY_LOGIN_REQUIRED":
+                        detail = "Máy chủ quét Douyin chưa có phiên đăng nhập hợp lệ. Cần nhập phiên Douyin vào bộ quản lý tài khoản của máy chủ API."
+                    elif task_code in ("UPSTREAM_RISK_CONTROL", "UPSTREAM_CHANGED"):
+                        detail = "Douyin đang giới hạn hoặc thay đổi phản hồi. Hãy chờ rồi quét lại."
+                    else:
+                        detail = str(task_error.get("message") or "Tác vụ quét Douyin thất bại.")
+                    raise HTTPException(status_code=502, detail=detail)
+            else:
+                raise HTTPException(status_code=504, detail="Máy chủ Douyin vẫn đang quét. Hãy thử lại sau ít phút.")
+
         if meta.get("guest_fallback") is True:
             raise HTTPException(
                 status_code=503,
                 detail="Máy chủ API đang dùng phiên khách nên danh sách có thể thiếu video mới. Hãy nhập phiên đăng nhập Douyin vào máy chủ API rồi quét lại.",
             )
 
-        page = envelope.get("data")
         if not isinstance(page, dict) or not isinstance(page.get("items"), list):
             raise HTTPException(
                 status_code=502,
@@ -643,8 +680,9 @@ def _scan_douyin_with_dtk_api(req: DouyinProfileScanRequest) -> Optional[dict]:
             if len(collected) >= req.max_items:
                 break
 
-        has_more = bool(page.get("has_more"))
-        next_cursor = page.get("cursor")
+        cursor_meta = meta.get("cursor") if isinstance(meta.get("cursor"), dict) else {}
+        has_more = bool(page.get("has_more", cursor_meta.get("has_more", False)))
+        next_cursor = page.get("cursor") or cursor_meta.get("next")
         if not has_more or not next_cursor or str(next_cursor) == cursor:
             has_more = False
             cursor = None
