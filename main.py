@@ -647,6 +647,16 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
             if cookie_pairs:
                 context.add_cookies(cookie_pairs)
             page = context.new_page()
+            # Keep Douyin scripts and API calls, but avoid downloading heavy
+            # visual assets that are not needed to enumerate profile videos.
+            page.route(
+                "**/*",
+                lambda route: route.abort()
+                if route.request.resource_type in ("image", "media", "font")
+                else route.continue_(),
+            )
+            page.set_default_timeout(5000)
+            page.set_default_navigation_timeout(15000)
             page.on("response", capture_profile_feed)
             page.on("request", lambda request: observed_aweme_requests.append({
                 "method": request.method,
