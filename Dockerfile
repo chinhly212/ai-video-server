@@ -1,8 +1,8 @@
 FROM golang:1.26 AS douyin-builder
 WORKDIR /src/douyin-scanner
 COPY douyin-scanner/go.mod ./
-RUN go mod download
 COPY douyin-scanner/main.go ./
+RUN go mod tidy
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/douyin-scanner .
 
 FROM python:3.11-slim
