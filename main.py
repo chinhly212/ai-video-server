@@ -427,6 +427,41 @@ def health_alias():
     return health()
 
 
+def _douyin_profile_from_aweme_items(items, sec_uid: str) -> dict:
+    """Extract creator identity from the author object embedded in profile-feed items."""
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        author = item.get("author") or item.get("author_info") or item.get("user")
+        if not isinstance(author, dict):
+            continue
+
+        def first_text(*values):
+            for value in values:
+                if isinstance(value, str) and value.strip() and value.strip().lower() != "null":
+                    return value.strip()
+            return None
+
+        avatar = author.get("avatar_larger") or author.get("avatar_thumb") or author.get("avatar_medium")
+        if isinstance(avatar, dict):
+            avatar = (avatar.get("url_list") or [None])[0]
+        elif isinstance(avatar, list):
+            avatar = avatar[0] if avatar else None
+        if isinstance(avatar, dict):
+            avatar = (avatar.get("url_list") or [None])[0]
+        return {
+            "sec_uid": first_text(author.get("sec_uid"), author.get("sec_user_id")) or sec_uid,
+            "nickname": first_text(author.get("nickname"), author.get("nick_name"), author.get("name")),
+            "unique_id": first_text(author.get("unique_id"), author.get("short_id"), author.get("uniqueId")),
+            "signature": first_text(author.get("signature"), author.get("desc")),
+            "avatar_url": first_text(avatar),
+            "follower_count": author.get("follower_count") or author.get("mplatform_followers_count"),
+            "following_count": author.get("following_count"),
+            "aweme_count": author.get("aweme_count"),
+        }
+    return {"sec_uid": sec_uid}
+
+
 def _parse_douyin_profile_feed(status: int, payload) -> list[dict]:
     """Validate a Douyin profile-feed response and normalize its video entries."""
     if status < 200 or status >= 300:
@@ -570,6 +605,7 @@ def _scan_douyin_with_signed_go(req: DouyinProfileScanRequest) -> Optional[dict]
         "status": "success",
         "platform": "DOUYIN",
         "profile_id": req.sec_uid,
+        "profile": _douyin_profile_from_aweme_items(raw_videos, req.sec_uid),
         "videos": videos,
         "video_count": len(videos),
         "feed_responses": 0,
@@ -799,6 +835,7 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
             })
 
     collected = {}
+    profile_info = {"sec_uid": sec_uid}
     feed_responses = 0
     valid_feed_responses = 0
     response_errors = []
@@ -847,6 +884,8 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
         try:
             payload = response.json()
             videos = _parse_douyin_profile_feed(response.status, payload)
+            if not profile_info.get("nickname"):
+                profile_info = _douyin_profile_from_aweme_items(payload.get("aweme_list"), sec_uid)
             next_cursor = str(payload.get("max_cursor") or "") or None
             page_has_older_videos = any(
                 video.get("published_at") is not None
@@ -1034,6 +1073,7 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
         "status": "success",
         "platform": "DOUYIN",
         "profile_id": sec_uid,
+        "profile": profile_info,
         "videos": videos,
         "video_count": len(videos),
         "feed_responses": feed_responses,
