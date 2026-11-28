@@ -462,6 +462,23 @@ def _douyin_profile_from_aweme_items(items, sec_uid: str) -> dict:
     return {"sec_uid": sec_uid}
 
 
+def _douyin_cover_url(item: dict) -> Optional[str]:
+    """Extract a cover image URL from common Douyin aweme payload shapes."""
+    video = item.get("video") if isinstance(item.get("video"), dict) else {}
+    candidates = [
+        video.get("cover"), video.get("dynamic_cover"), video.get("origin_cover"),
+        item.get("cover_url"), item.get("thumbnail_url"), item.get("thumbnail"), item.get("cover"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            candidate = candidate.get("url_list") or candidate.get("url") or candidate.get("uri")
+        if isinstance(candidate, list):
+            candidate = next((value for value in candidate if isinstance(value, str) and value.startswith(("https://", "http://"))), None)
+        if isinstance(candidate, str) and candidate.startswith(("https://", "http://")):
+            return candidate
+    return None
+
+
 def _parse_douyin_profile_feed(status: int, payload) -> list[dict]:
     """Validate a Douyin profile-feed response and normalize its video entries."""
     if status < 200 or status >= 300:
@@ -493,6 +510,7 @@ def _parse_douyin_profile_feed(status: int, payload) -> list[dict]:
             "title": description,
             "description": description,
             "published_at": published_at,
+            "thumbnail_url": _douyin_cover_url(item),
         })
     return videos
 
@@ -790,6 +808,7 @@ def _scan_douyin_with_dtk_api(req: DouyinProfileScanRequest) -> Optional[dict]:
                 "title": str(item.get("title") or description),
                 "description": description,
                 "published_at": published_at,
+                "thumbnail_url": _douyin_cover_url(item),
             })
             if len(collected) >= req.max_items:
                 break
