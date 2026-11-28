@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"regexp"
@@ -39,7 +40,7 @@ func scan(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	client, err := douyin.NewClient(req.Cookie, douyin.Options{})
 	if err != nil { write(w, http.StatusBadGateway, scanResponse{Status:"error", Error:"cannot initialize Douyin session"}); return }
-	posts, err := client.GetUserAllWorkInfo(ctx, "https://www.douyin.com/user/"+req.SecUID, req.MaxItems)
+	posts, err := scanAllPosts(ctx, client, "https://www.douyin.com/user/"+req.SecUID, req.MaxItems)
 	if err != nil {
 		log.Printf("Douyin scan failed sec_uid=%s err=%v", req.SecUID[:18], err)
 		write(w, http.StatusBadGateway, scanResponse{Status:"error", Error: safeError(err)})
@@ -48,6 +49,44 @@ func scan(w http.ResponseWriter, r *http.Request) {
 	if posts == nil { posts = []any{} }
 	write(w, http.StatusOK, scanResponse{Status:"success", Videos:posts, VideoCount:len(posts)})
 }
+func scanAllPosts(ctx context.Context, client *douyin.Client, profileURL string, limit int) ([]any, error) {
+	const pageSize = 18
+	maxPages := (limit + pageSize - 1) / pageSize + 2
+	cursor := "0"
+	seen := make(map[string]bool)
+	posts := make([]any, 0, limit)
+	for page := 0; page < maxPages && len(posts) < limit; page++ {
+		result, err := client.GetUserWorkInfo(ctx, profileURL, cursor)
+		if err != nil { return nil, err }
+		raw, ok := result["aweme_list"].([]any)
+		if !ok {
+			if status, exists := result["status_msg"]; exists {
+				return nil, fmt.Errorf("Douyin feed rejected request: %v", status)
+			}
+			return nil, fmt.Errorf("Douyin feed response has no aweme_list")
+		}
+		before := len(posts)
+		for _, item := range raw {
+			record, ok := item.(map[string]any)
+			if !ok { continue }
+			id := fmt.Sprint(record["aweme_id"])
+			if id == "" || id == "<nil>" { id = fmt.Sprint(record["id"]) }
+			if id == "" || id == "<nil>" || seen[id] { continue }
+			seen[id] = true
+			posts = append(posts, record)
+			if len(posts) >= limit { break }
+		}
+		hasMore := fmt.Sprint(result["has_more"]) == "1" || fmt.Sprint(result["has_more"]) == "true"
+		nextCursor := fmt.Sprint(result["max_cursor"])
+		if !hasMore || len(posts) == before || nextCursor == "" || nextCursor == "<nil>" || nextCursor == cursor {
+			break
+		}
+		cursor = nextCursor
+	}
+	if len(posts) > limit { posts = posts[:limit] }
+	return posts, nil
+}
+
 func safeError(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) { return "Douyin request timed out" }
 	msg := err.Error()
