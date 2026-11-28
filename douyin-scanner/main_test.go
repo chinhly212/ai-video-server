@@ -115,6 +115,21 @@ func TestScanAllPostsReturnsUpstreamError(t *testing.T) {
 	}
 }
 
+func TestScanOnePageReturnsNextCursorWithoutFetchingLaterPages(t *testing.T) {
+	client := &fakeWorksClient{pages: map[string]map[string]any{
+		"cursor-1": {
+			"aweme_list": []any{work("one"), work("two")},
+			"has_more": 1,
+			"max_cursor": "cursor-2",
+		},
+	}}
+	got, next, hasMore, err := scanOnePage(context.Background(), client, "https://www.douyin.com/user/test", "cursor-1", 20)
+	if err != nil { t.Fatalf("scanOnePage returned error: %v", err) }
+	if len(got) != 2 { t.Fatalf("got %d posts, want 2", len(got)) }
+	if next != "cursor-2" || !hasMore { t.Fatalf("next=%q hasMore=%v, want cursor-2/true", next, hasMore) }
+	if !reflect.DeepEqual(client.calls, []string{"cursor-1"}) { t.Fatalf("cursor calls = %#v", client.calls) }
+}
+
 func TestNormalizeDouyinCookiePromotesTemporaryUIFID(t *testing.T) {
 	got := normalizeDouyinCookie("sessionid=abc; UIFID_TEMP=temp-issued; ttwid=xyz")
 	want := "sessionid=abc; UIFID_TEMP=temp-issued; ttwid=xyz; UIFID=temp-issued"
