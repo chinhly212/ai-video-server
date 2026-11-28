@@ -74,15 +74,16 @@ func normalizeDouyinCookie(raw string) string {
 	return strings.Join(out, "; ")
 }
 func extractDouyinUIFID(raw string) string {
+	temporary := ""
 	for _, part := range strings.Split(raw, ";") {
 		name, value, found := strings.Cut(strings.TrimSpace(part), "=")
 		if !found { continue }
 		name = strings.TrimSpace(name)
-		if strings.EqualFold(name, "UIFID") || strings.EqualFold(name, "UIFID_TEMP") {
-			return strings.TrimSpace(value)
-		}
+		value = strings.TrimSpace(value)
+		if strings.EqualFold(name, "UIFID") && value != "" { return value }
+		if strings.EqualFold(name, "UIFID_TEMP") && value != "" { temporary = value }
 	}
-	return ""
+	return temporary
 }
 
 var secUIDPattern = regexp.MustCompile(`^MS4wLjAB[A-Za-z0-9_-]{10,240}package main
