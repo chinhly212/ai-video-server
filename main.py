@@ -499,11 +499,11 @@ def _open_douyin_profile_page(page, profile_url: str) -> bool:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
     try:
-        page.goto(profile_url, wait_until="commit", timeout=25000)
+        page.goto(profile_url, wait_until="commit", timeout=15000)
         return True
     except PlaywrightTimeoutError:
         log.warning(
-            "Douyin profile navigation did not reach commit within 25s; "
+            "Douyin profile navigation did not reach commit within 15s; "
             "continuing to inspect any captured feed responses"
         )
         return False
@@ -627,7 +627,18 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
 
     try:
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-extensions",
+                    "--disable-background-networking",
+                    "--disable-renderer-backgrounding",
+                    "--disable-background-timer-throttling",
+                ],
+            )
             context = browser.new_context(
                 user_agent=user_agent,
                 locale="zh-CN",
@@ -648,14 +659,14 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
             try:
                 profile_url = "https://www.douyin.com/user/" + sec_uid
                 navigation_committed = _open_douyin_profile_page(page, profile_url)
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(1800)
                 activated_tab = _activate_douyin_posts_tab(page)
                 # Trigger both the page's natural infinite-scroll handler and a
                 # direct window scroll; profile feeds may be nested in a page
                 # container and ignore a single mouse-wheel event.
                 try:
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    page.wait_for_timeout(1200)
+                    page.wait_for_timeout(700)
                 except Exception:
                     pass
                 try:
@@ -687,7 +698,7 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
                 previous_count = len(collected)
                 # One browser session collects multiple feed pages. This avoids
                 # launching Chromium again for every 20-video batch from Android.
-                for _ in range(50):
+                for _ in range(40):
                     if len(collected) >= req.max_items:
                         break
                     if valid_feed_responses > 0 and not has_more:
@@ -698,7 +709,7 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
                         page.evaluate("window.scrollBy(0, Math.max(window.innerHeight, 2200))")
                     except Exception:
                         pass
-                    page.wait_for_timeout(1400)
+                    page.wait_for_timeout(900)
                     current_count = len(collected)
                     if current_count == previous_count and feed_responses == before_responses:
                         stagnant_rounds += 1
