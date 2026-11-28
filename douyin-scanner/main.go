@@ -25,6 +25,53 @@ type scanResponse struct {
 	VideoCount int `json:"video_count"`
 	Error string `json:"error,omitempty"`
 }
+
+type argusHeaderTransport struct { base douyin.Transport }
+
+// Douyin's web gateway requires this header before it evaluates the UIFID
+// and web-signature fields. Inject it consistently on every Douyin request.
+func (t argusHeaderTransport) Do(ctx context.Context, method, rawURL string, headers douyin.Headers, cookieHeader string, body []byte) (*douyin.Response, error) {
+	if strings.Contains(strings.ToLower(rawURL), "douyin.com") {
+		headers.Set("x-tt-argus", "1")
+	}
+	return t.base.Do(ctx, method, rawURL, headers, cookieHeader, body)
+}
+func (t argusHeaderTransport) Get(ctx context.Context, rawURL string, headers douyin.Headers, cookieHeader string) (*douyin.Response, error) {
+	return t.Do(ctx, http.MethodGet, rawURL, headers, cookieHeader, nil)
+}
+func (t argusHeaderTransport) PostJSON(ctx context.Context, rawURL string, headers douyin.Headers, cookieHeader, contentType string, body []byte) (*douyin.Response, error) {
+	if contentType != "" { headers.Set("content-type", contentType) }
+	return t.Do(ctx, http.MethodPost, rawURL, headers, cookieHeader, body)
+}
+
+// The web session may expose UIFID_TEMP before UIFID. The Go client signs
+// requests from the canonical UIFID cookie name, so promote the temporary
+// platform-issued value without fabricating a new device identifier.
+func normalizeDouyinCookie(raw string) string {
+	parts := strings.Split(raw, ";")
+	out := make([]string, 0, len(parts)+1)
+	tempUIFID := ""
+	hasUIFID := false
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" { continue }
+		name, value, found := strings.Cut(part, "=")
+		name = strings.TrimSpace(name)
+		if found && strings.EqualFold(name, "UIFID") {
+			hasUIFID = true
+			out = append(out, "UIFID="+strings.TrimSpace(value))
+			continue
+		}
+		if found && strings.EqualFold(name, "UIFID_TEMP") {
+			tempUIFID = strings.TrimSpace(value)
+			out = append(out, "UIFID_TEMP="+tempUIFID)
+			continue
+		}
+		out = append(out, part)
+	}
+	if !hasUIFID && tempUIFID != "" { out = append(out, "UIFID="+tempUIFID) }
+	return strings.Join(out, "; ")
+}
 var secUIDPattern = regexp.MustCompile(`^MS4wLjAB[A-Za-z0-9_-]{10,240}$`)
 
 func scan(w http.ResponseWriter, r *http.Request) {
@@ -35,13 +82,16 @@ func scan(w http.ResponseWriter, r *http.Request) {
 	decoder.UseNumber() // Preserve large Douyin pagination cursors without float64 rounding.
 	if err := decoder.Decode(&req); err != nil { http.Error(w, "invalid JSON", http.StatusBadRequest); return }
 	req.SecUID = strings.TrimSpace(req.SecUID)
-	req.Cookie = strings.TrimSpace(req.Cookie)
+	req.Cookie = normalizeDouyinCookie(strings.TrimSpace(req.Cookie))
 	if !secUIDPattern.MatchString(req.SecUID) || req.Cookie == "" { http.Error(w, "sec_uid or cookie invalid", http.StatusBadRequest); return }
 	if req.MaxItems < 1 { req.MaxItems = 600 }
 	if req.MaxItems > 600 { req.MaxItems = 600 }
 	ctx, cancel := context.WithTimeout(r.Context(), 7*time.Minute)
 	defer cancel()
-	client, err := douyin.NewClient(req.Cookie, douyin.Options{})
+	baseTransport, err := douyin.NewHTTPClient(douyin.ProxyFromEnv())
+	if err != nil { write(w, http.StatusBadGateway, scanResponse{Status:"error", Error:"cannot initialize Douyin HTTP transport"}); return }
+	transport := argusHeaderTransport{base: baseTransport}
+	client, err := douyin.NewClient(req.Cookie, douyin.Options{Transport: transport})
 	if err != nil { write(w, http.StatusBadGateway, scanResponse{Status:"error", Error:"cannot initialize Douyin session"}); return }
 	posts, err := scanAllPosts(ctx, client, "https://www.douyin.com/user/"+req.SecUID, req.MaxItems)
 	if err != nil {
