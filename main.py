@@ -585,22 +585,47 @@ def _scan_douyin_with_signed_go(req: DouyinProfileScanRequest) -> Optional[dict]
         return None
     try:
         envelope = response.json()
-    except ValueError as exc:
-        raise HTTPException(status_code=502, detail="Bộ quét Douyin trả về dữ liệu không hợp lệ.") from exc
+    except ValueError:
+        content_type = response.headers.get("content-type", "")
+        preview = re.sub(r"\\s+", " ", response.text[:180])
+        log.warning(
+            "Local Go Douyin scanner returned non-JSON; HTTP=%s content_type=%s body=%r; trying fallback scanner",
+            response.status_code, content_type[:100], preview,
+        )
+        return None
+
+    if not isinstance(envelope, dict):
+        log.warning(
+            "Local Go Douyin scanner returned unexpected JSON type=%s; trying fallback scanner",
+            type(envelope).__name__,
+        )
+        return None
+
     if response.status_code != 200 or envelope.get("status") != "success":
         detail = str(envelope.get("error") or "Bộ quét chữ ký Douyin không lấy được danh sách video.")
-        log.warning("Go Douyin scanner rejected profile: HTTP %s; %s", response.status_code, detail[:180])
-        raise HTTPException(status_code=502, detail=f"Quét Douyin thất bại: {detail[:220]}")
+        log.warning(
+            "Go Douyin scanner rejected profile: HTTP %s; %s; trying fallback scanner",
+            response.status_code, detail[:180],
+        )
+        return None
+
     raw_videos = envelope.get("videos")
     if not isinstance(raw_videos, list):
-        raise HTTPException(status_code=502, detail="Bộ quét Douyin không trả danh sách video.")
+        log.warning("Go Douyin scanner response has no videos array; trying fallback scanner")
+        return None
+
     try:
         videos = _parse_douyin_profile_feed(200, {"aweme_list": raw_videos})
     except ValueError as exc:
-        raise HTTPException(status_code=502, detail="Dữ liệu video Douyin không đúng định dạng.") from exc
-    videos = _filter_douyin_profile_videos(videos_by_id := {item["id"]: item for item in videos}, req.since_timestamp, req.max_items)
+        log.warning("Go Douyin scanner video schema mismatch: %s; trying fallback scanner", str(exc)[:160])
+        return None
+
+    videos = _filter_douyin_profile_videos(
+        {item["id"]: item for item in videos}, req.since_timestamp, req.max_items
+    )
     if not videos:
-        raise HTTPException(status_code=404, detail="Hồ sơ Douyin không có video công khai trong phạm vi yêu cầu.")
+        log.info("Go Douyin scanner returned no public posts; trying fallback scanner")
+        return None
     return {
         "status": "success",
         "platform": "DOUYIN",
