@@ -853,9 +853,13 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
     signed_result = _scan_douyin_with_signed_go(req)
     if signed_result is not None:
         return signed_result
-    dtk_result = _scan_douyin_with_dtk_api(req)
-    if dtk_result is not None:
-        return dtk_result
+
+    # The app's saved Douyin cookie must remain the active identity.
+    # Only use the separately hosted DTK identity pool when no app cookie exists.
+    if not req.cookie.strip():
+        dtk_result = _scan_douyin_with_dtk_api(req)
+        if dtk_result is not None:
+            return dtk_result
 
     from playwright.sync_api import sync_playwright
 
