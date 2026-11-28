@@ -31,7 +31,9 @@ func scan(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost { http.Error(w, "method not allowed", http.StatusMethodNotAllowed); return }
 	r.Body = http.MaxBytesReader(w, r.Body, 20000)
 	var req scanRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { http.Error(w, "invalid JSON", http.StatusBadRequest); return }
+	decoder := json.NewDecoder(r.Body)
+	decoder.UseNumber() // Preserve large Douyin pagination cursors without float64 rounding.
+	if err := decoder.Decode(&req); err != nil { http.Error(w, "invalid JSON", http.StatusBadRequest); return }
 	req.SecUID = strings.TrimSpace(req.SecUID)
 	req.Cookie = strings.TrimSpace(req.Cookie)
 	if !secUIDPattern.MatchString(req.SecUID) || req.Cookie == "" { http.Error(w, "sec_uid or cookie invalid", http.StatusBadRequest); return }
