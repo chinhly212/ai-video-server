@@ -508,6 +508,23 @@ def _open_douyin_profile_page(page, profile_url: str) -> bool:
         )
         return False
 
+def _activate_douyin_posts_tab(page) -> Optional[str]:
+    """Explicitly activate the creator's public-post tab before scrolling.
+
+    Some Douyin profile layouts render the profile shell first and do not
+    request the post feed until the Works tab is selected.
+    """
+    for label in ("作品", "视频", "Posts", "Videos"):
+        try:
+            locator = page.get_by_text(label, exact=True).first
+            if locator.count() and locator.is_visible():
+                locator.click(timeout=2500)
+                page.wait_for_timeout(1800)
+                return label
+        except Exception:
+            continue
+    return None
+
 
 @app.post("/douyin/profile/videos")
 def douyin_profile_videos(req: DouyinProfileScanRequest):
@@ -546,9 +563,13 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
     page_diagnostics = {
         "navigation_committed": None,
         "final_path": "",
+        "page_title": "",
+        "body_hint": "",
+        "posts_tab_activated": None,
         "login_hint": False,
         "verify_hint": False,
     }
+    failed_requests = []
     next_cursor = None
     has_more = False
 
@@ -615,10 +636,23 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
                 context.add_cookies(cookie_pairs)
             page = context.new_page()
             page.on("response", capture_profile_feed)
+            page.on("requestfailed", lambda request: failed_requests.append({
+                "path": urlparse(request.url).path[:140],
+                "failure": str(request.failure or "request failed")[:100],
+            }) if len(failed_requests) < 5 else None)
             try:
                 profile_url = "https://www.douyin.com/user/" + sec_uid
                 navigation_committed = _open_douyin_profile_page(page, profile_url)
                 page.wait_for_timeout(3000)
+                activated_tab = _activate_douyin_posts_tab(page)
+                # Trigger both the page's natural infinite-scroll handler and a
+                # direct window scroll; profile feeds may be nested in a page
+                # container and ignore a single mouse-wheel event.
+                try:
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(1200)
+                except Exception:
+                    pass
                 try:
                     page_text = (page.locator("body").inner_text(timeout=1500) or "").lower()
                 except Exception as page_text_error:
@@ -630,6 +664,9 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
                 page_diagnostics.update({
                     "navigation_committed": navigation_committed,
                     "final_path": urlparse(page.url).path[:180],
+                    "page_title": (page.title() or "")[:120],
+                    "body_hint": re.sub(r"\\s+", " ", page_text)[:180],
+                    "posts_tab_activated": activated_tab,
                     "login_hint": any(word in page_text for word in ("登录", "login", "扫码")),
                     "verify_hint": any(word in page_text for word in ("验证", "验证码", "captcha", "安全验证")),
                 })
@@ -652,7 +689,11 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
                         break
                     before_responses = feed_responses
                     page.mouse.wheel(0, 2600)
-                    page.wait_for_timeout(1000)
+                    try:
+                        page.evaluate("window.scrollBy(0, Math.max(window.innerHeight, 2200))")
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(1400)
                     current_count = len(collected)
                     if current_count == previous_count and feed_responses == before_responses:
                         stagnant_rounds += 1
@@ -689,9 +730,17 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
             detail += " Không bắt được API danh sách bài đăng từ trang hồ sơ."
         detail += (
             f" Chẩn đoán: đường dẫn cuối={page_diagnostics['final_path'] or 'không rõ'};"
+            f" tiêu đề={page_diagnostics['page_title'] or 'không rõ'};"
+            f" tab bài đăng={page_diagnostics['posts_tab_activated'] or 'chưa kích hoạt'};"
             f" phản hồi aweme={len(observed_aweme_responses)};"
             f" phản hồi khớp={feed_responses}; lỗi đọc={len(response_errors)}."
         )
+        if page_diagnostics["body_hint"]:
+            detail += f" Nội dung trang={page_diagnostics['body_hint']}."
+        if failed_requests:
+            detail += " Yêu cầu lỗi: " + ", ".join(
+                f"{item['path']} ({item['failure']})" for item in failed_requests[:3]
+            ) + "."
         if observed_aweme_responses:
             paths = ", ".join(
                 f"{item['path']} [HTTP {item['status']}]"
