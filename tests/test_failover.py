@@ -365,6 +365,13 @@ def test_douyin_video_filter_respects_max_items_after_sorting():
 
 
 
+def test_douyin_profile_feed_path_accepts_versioned_and_variant_routes():
+    assert main._is_douyin_profile_feed_path("/aweme/v1/web/aweme/post/")
+    assert main._is_douyin_profile_feed_path("/aweme/v2/web/aweme/post/")
+    assert not main._is_douyin_profile_feed_path("/aweme/v1/web/aweme/favorite/")
+    assert not main._is_douyin_profile_feed_path("/aweme/v1/web/aweme/detail/")
+
+
 def test_douyin_feed_request_cursor_defaults_to_first_page():
     assert main._douyin_feed_request_cursor("https://www.douyin.com/aweme/v1/web/aweme/post/?sec_user_id=abc") == "0"
 
