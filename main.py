@@ -463,9 +463,14 @@ def _parse_douyin_profile_feed(status: int, payload) -> list[dict]:
 
 
 def _is_douyin_profile_feed_path(response_path: str) -> bool:
-    """Recognize Douyin profile-post endpoint variants without matching unrelated aweme APIs."""
+    """Recognize profile-feed endpoint variants across Douyin web API revisions.
+
+    Douyin has changed the profile-post endpoint path several times. The caller
+    validates the response body (it must contain an aweme_list), so requiring
+    the URL to end in /post incorrectly discards valid profile-feed responses.
+    """
     normalized = response_path.rstrip("/").lower()
-    return "aweme" in normalized and normalized.endswith("/post")
+    return "aweme" in normalized
 
 
 def _douyin_feed_request_cursor(response_url: str) -> str:
@@ -779,6 +784,9 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
             "Douyin profile response path=%s status=%s content_type=%s",
             response_path, response.status, content_type
         )
+        # Do not require a literal /post suffix: Douyin has served the
+        # creator's aweme_list through different aweme endpoints over time.
+        # _parse_douyin_profile_feed below is the strict payload validator.
         if not _is_douyin_profile_feed_path(response_path):
             return
         request_cursor = _douyin_feed_request_cursor(response.url)
@@ -795,7 +803,12 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
                 and video["published_at"] < req.since_timestamp
                 for video in videos
             )
-            has_more = bool(int(payload.get("has_more") or 0)) and not page_has_older_videos
+            raw_has_more = payload.get("has_more", 0)
+            has_more_flag = (
+                raw_has_more is True
+                or str(raw_has_more).strip().lower() in ("1", "true", "yes")
+            )
+            has_more = has_more_flag and not page_has_older_videos
             valid_feed_responses += 1
             log.info(
                 "Douyin profile feed parsed cursor=%s keys=%s aweme_count=%s has_more=%s max_cursor_present=%s",
@@ -1098,366 +1111,3 @@ def download_via_ytdlp(source_url: str):
         )
     except Exception:
         shutil.rmtree(temp_dir, ignore_errors=True)
-        raise
-
-
-@app.post("/download/proxy")
-def download_proxy_endpoint(req: VideoProxyRequest):
-    # Always validate the public platform URL before touching a CDN URL.
-    validate_video_url(req.source_url)
-    media_url = validate_public_media_url(req.video_url)
-    source_host = (urlparse(req.source_url).hostname or "").lower()
-    if source_host.endswith("kuaishou.com") or source_host.endswith("gifshow.com"):
-        referer = "https://www.kuaishou.com/"
-        user_agent = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
-    elif source_host.endswith("tiktok.com") or source_host.endswith("tiktokv.com"):
-        referer = "https://www.tiktok.com/"
-        user_agent = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-    elif source_host.endswith("douyin.com") or source_host.endswith("iesdouyin.com"):
-        referer = "https://www.douyin.com/"
-        user_agent = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-    else:
-        referer = req.source_url
-        user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-
-    headers = {
-        "User-Agent": user_agent,
-        "Accept": "video/*,application/octet-stream;q=0.9,*/*;q=0.8",
-        "Referer": referer,
-    }
-    upstream = None
-    direct_error = None
-    current_url = media_url
-    try:
-        for _ in range(6):
-            validate_public_media_url(current_url)
-            upstream = HTTP.get(
-                current_url,
-                headers=headers,
-                stream=True,
-                allow_redirects=False,
-                timeout=(15, 120),
-            )
-            if upstream.is_redirect:
-                location = upstream.headers.get("Location")
-                upstream.close()
-                upstream = None
-                if not location:
-                    direct_error = "CDN chuyển hướng nhưng không cung cấp URL đích."
-                    break
-                from urllib.parse import urljoin
-                current_url = urljoin(current_url, location)
-                continue
-            if upstream.status_code < 200 or upstream.status_code >= 300:
-                direct_error = f"CDN từ chối gửi file video (HTTP {upstream.status_code})."
-                upstream.close()
-                upstream = None
-                break
-            content_type = upstream.headers.get("Content-Type", "application/octet-stream").lower()
-            if (
-                "text/html" in content_type
-                or "application/json" in content_type
-                or "video/webm" in content_type
-                or "video/x-matroska" in content_type
-            ):
-                direct_error = f"CDN trả định dạng không phù hợp để lưu MP4 ({content_type})."
-                upstream.close()
-                upstream = None
-                break
-
-            def stream_media():
-                try:
-                    for chunk in upstream.iter_content(chunk_size=256 * 1024):
-                        if chunk:
-                            yield chunk
-                finally:
-                    upstream.close()
-
-            response_headers = {"X-Video-Provider": req.provider[:120]}
-            content_length = upstream.headers.get("Content-Length")
-            if content_length and content_length.isdigit():
-                response_headers["Content-Length"] = content_length
-            return StreamingResponse(stream_media(), media_type=content_type, headers=response_headers)
-        else:
-            direct_error = "CDN chuyển hướng quá nhiều lần."
-    except HTTPException as exc:
-        if exc.status_code < 500:
-            if upstream is not None:
-                upstream.close()
-            raise
-        direct_error = str(exc.detail)
-    except requests.RequestException as exc:
-        direct_error = f"{type(exc).__name__}: {str(exc)[:160]}"
-    if upstream is not None:
-        upstream.close()
-        upstream = None
-
-    # A CDN may reject the server's direct request (for example HTTP 409).
-    # Retry by letting yt-dlp download the original public platform page on
-    # the server, then stream the finished file and clean it after delivery.
-    log.warning("Direct CDN transfer failed; trying yt-dlp fallback: %s", (direct_error or "unknown")[:240])
-    try:
-        return download_via_ytdlp(req.source_url)
-    except Exception as fallback_error:
-        log.warning("yt-dlp proxy fallback failed: %s", str(fallback_error)[:240])
-        raise HTTPException(
-            status_code=502,
-            detail="Không thể tải video từ nguồn hiện tại. Hãy thử lại sau hoặc kiểm tra video còn công khai hay không.",
-        ) from fallback_error
-
-@app.post("/download")
-def download_endpoint(req: DownloadRequest):
-    result = download_with_failover(req.url)
-    if result.get("status") != "success":
-        return JSONResponse(status_code=502, content=result)
-    return result
-
-@app.post("/chat")
-def chat_endpoint(
-    req: ChatRequest,
-    gemini_api_key: str = Header(default="", alias="X-Gemini-Api-Key"),
-    openrouter_api_key: str = Header(default="", alias="X-OpenRouter-Api-Key"),
-    deepseek_api_key: str = Header(default="", alias="X-DeepSeek-Api-Key"),
-):
-    message = req.message.strip()
-    if not message:
-        raise HTTPException(status_code=400, detail="Tin nhắn không được để trống.")
-
-    urls = re.findall(r"https?://[^\s<>]+", message)
-    if urls:
-        if len(urls) != 1:
-            return {
-                "type": "unsupported_link",
-                "message": "MuChi chỉ nhận một link video hợp lệ mỗi lần. Chủ nhân gửi lại một link video từ nền tảng được hỗ trợ nhé.",
-            }
-        video_url = urls[0].rstrip(".,);]")
-        if not is_supported_video_link(video_url):
-            return {
-                "type": "unsupported_link",
-                "message": "Đường dẫn này không được hỗ trợ. MuChi chỉ nhận link video hợp lệ từ các nền tảng video được hỗ trợ.",
-            }
-        result = download_with_failover(video_url)
-        if result.get("status") == "success":
-            return {
-                "type": "video",
-                "message": "Tôi đã tìm thấy video.",
-                "data": result,
-            }
-        return {
-            "type": "text",
-            "message": "Xin lỗi, hiện tại tôi chưa tìm được video từ đường dẫn này.",
-            "errors": result.get("provider_errors", []),
-        }
-
-    normalized_message = message.lower()
-    if re.search(
-        r"(chủ\s*(sở hữu|app|ứng dụng)|người\s*tạo|ai\s*(là\s*)?(chủ|tạo|làm).*(muchi|ứng dụng|app))",
-        normalized_message,
-    ):
-        return {"type": "text", "message": "Chủ sở hữu ứng dụng MuChi là Chính Ly."}
-
-    if re.search(r"(hỗ trợ.*nền tảng|nền tảng.*hỗ trợ|bao nhiêu.*nền tảng)", normalized_message):
-        return {
-            "type": "text",
-            "message": (
-                "MuChi nhận link video từ 10 nền tảng: TikTok, Douyin, Kuaishou, YouTube, "
-                "Instagram, Facebook, Threads, X/Twitter, Reddit và Bilibili. "
-                "Tính năng theo dõi và quét kênh hiện hỗ trợ Douyin và Kuaishou. "
-                "Video cần ở chế độ công khai và khả dụng thì mới có thể tải."
-            ),
-        }
-
-    if re.search(r"(đăng nhập|login).*(douyin|kuaishou)|(douyin|kuaishou).*(đăng nhập|login)", normalized_message):
-        platform = "Douyin" if "douyin" in normalized_message else "Kuaishou"
-        return {
-            "type": "text",
-            "message": (
-                f"Đăng nhập {platform}: 1. Mở Cài đặt > Đăng nhập nền tảng > {platform}. "
-                f"2. Đăng nhập trên trang {platform} chính thức mở bên trong MuChi. "
-                "3. Khi đăng nhập xong, bấm 'Đã đăng nhập – lưu phiên'. "
-                f"4. Vào Cài đặt > Thêm tài khoản, chọn {platform}, nhập ID hoặc URL hồ sơ, "
-                "xác minh thông tin rồi bật tài khoản. "
-                "5. Vào Công việc > Quét ngay để bắt đầu. "
-                "Không gửi mật khẩu hoặc mã xác minh cho tôi qua chat."
-            ),
-        }
-
-    if re.search(r"(quét video|quét kênh|theo dõi kênh|theo dõi tài khoản)", normalized_message):
-        return {
-            "type": "text",
-            "message": (
-                "Quy trình theo dõi và quét video: 1. Đăng nhập Douyin hoặc Kuaishou trong Cài đặt. "
-                "2. Chọn Thêm tài khoản, nhập ID hoặc URL hồ sơ và xác minh. "
-                "3. Bật tài khoản muốn theo dõi. 4. Vào Công việc > Quét ngay. "
-                "5. MuChi lấy video mới từ các tài khoản đang bật, bỏ qua video trùng, "
-                "thêm video mới vào hàng đợi và tự chạy các bước xử lý được cấu hình. "
-                "Chủ nhân theo dõi tiến trình trong Công việc; nếu có lỗi, xem Thông báo hệ thống ở Trang chủ."
-            ),
-        }
-
-    if re.search(r"\b(api|gemini|openrouter|deepseek|mô hình ai|mô hình nào|các mô hình|mấy mô hình|bao nhiêu mô hình|nhà cung cấp mô hình|\d+\s*mô hình)\b", normalized_message):
-        return {
-            "type": "text",
-            "message": "Tôi không chia sẻ thông tin cấu hình kỹ thuật nội bộ. Chủ nhân có thể quản lý kết nối trợ lý trong phần Cài đặt.",
-        }
-
-    if re.search(
-        r"(đánh cắp|lấy trộm|chiếm đoạt|phishing|keylogger|ransomware|mã độc|xâm nhập trái phép|vượt xác thực|bypass đăng nhập)",
-        normalized_message,
-    ):
-        return {
-            "type": "text",
-            "message": "Xin lỗi chủ nhân, tôi không thể hỗ trợ yêu cầu có thể xâm phạm quyền riêng tư hoặc gây hại.",
-        }
-
-    system_prompt = (
-        "Bạn là trợ lý AI riêng của ứng dụng MuChi. Chủ sở hữu ứng dụng là Chính Ly. "
-        "Chỉ nêu tên Chính Ly khi người dùng hỏi trực tiếp về chủ app, người tạo hoặc chủ sở hữu; "
-        "không tự nhắc tên này trong cuộc trò chuyện bình thường. Người đang trò chuyện là chủ nhân; "
-        "gọi 'chủ nhân' tự nhiên khi phù hợp, không lạm dụng. "
-        "Trả lời bằng tiếng Việt tự nhiên, ấm áp, ngắn gọn, đúng trọng tâm. Không bịa thông tin. "
-        "Nếu thiếu dữ kiện, hỏi một câu ngắn để làm rõ. "
-        "KIẾN THỨC CHÍNH XÁC VỀ ỨNG DỤNG MUCHI: "
-        "MuChi có các khu vực Trang chủ, Công việc, AI, Bộ nhớ và Cài đặt. "
-        "Trang chủ hiển thị trạng thái hệ thống, tiến trình công việc và thông báo lỗi; "
-        "người dùng có thể xem chi tiết sự cố, đánh dấu đã hiểu hoặc xóa thông báo. "
-        "Khu vực Công việc hiển thị hàng đợi video và các trạng thái đang chạy, đang chờ, hoàn thành, lỗi, tạm dừng; "
-        "có nút Quét ngay, Tiếp tục tất cả, lọc công việc và điều khiển tạm dừng/tiếp tục từng công việc. "
-        "Cài đặt quản lý tài khoản nguồn Douyin và Kuaishou, bật/tắt hoặc xóa tài khoản, "
-        "đăng nhập nền tảng, cấp quyền thông báo/lưu trữ và mở cấu hình trợ lý. "
-        "Muốn thêm tài khoản theo dõi: đăng nhập nền tảng trước, vào Cài đặt > Thêm tài khoản, "
-        "chọn Douyin hoặc Kuaishou, nhập ID hoặc URL hồ sơ, xác minh thông tin rồi bật tài khoản. "
-        "Đăng nhập Douyin: Cài đặt > Đăng nhập nền tảng > Douyin; đăng nhập trong trang chính thức "
-        "mở bên trong ứng dụng, sau đó bấm 'Đã đăng nhập – lưu phiên'. "
-        "Đăng nhập Kuaishou làm tương tự bằng nút Kuaishou. MuChi lưu cookie phiên trên điện thoại; "
-        "người dùng tự nhập mật khẩu trên trang chính thức, ứng dụng không yêu cầu gửi mật khẩu vào chat. "
-        "Cách quét: bật tài khoản nguồn đã đăng nhập, vào Công việc > Quét ngay; ứng dụng lấy video mới "
-        "từ các tài khoản đang bật, bỏ qua video trùng, lưu video mới vào danh sách và tạo công việc xử lý. "
-        "Quá trình tự động đi qua các bước được cấu hình như tải video, phân tích/tối ưu, nhận diện giọng nói, "
-        "dịch, tạo giọng đọc, phụ đề, ghép, xuất và xác minh; một số bước có thể không chạy nếu tác vụ "
-        "hoặc cấu hình không yêu cầu. Nếu lỗi, xem Thông báo hệ thống ở Trang chủ rồi thử tiếp tục công việc. "
-        "Khu vực Bộ nhớ hiển thị dung lượng điện thoại, video đã xử lý và các chức năng kết nối Google Drive "
-        "để tải lên, tải xuống, làm mới hoặc xóa tệp Drive. "
-        "Trợ lý AI hỗ trợ trò chuyện, giải thích tính năng và hướng dẫn thao tác; "
-        "trong tab AI có nút 'Xóa toàn bộ' để xóa lịch sử chat đã lưu. "
-        "Chức năng tải link video chỉ nhận link video hợp lệ từ các nền tảng sau: TikTok, Douyin, Kuaishou, "
-        "YouTube, Instagram, Facebook, Threads, X/Twitter, Reddit và Bilibili. "
-        "Không khẳng định mọi video đều tải được: video riêng tư, bị giới hạn vùng, hết hạn hoặc nền tảng đổi cấu trúc "
-        "có thể không xử lý được. Tài khoản quét kênh hiện chỉ hỗ trợ Douyin và Kuaishou. "
-        "KHÔNG tiết lộ bất kỳ tên API, nhà cung cấp mô hình AI, số lượng mô hình, endpoint, máy chủ, "
-        "dịch vụ tải, mã HTTP, log hoặc chi tiết triển khai nội bộ. Nếu bị hỏi về cấu hình kỹ thuật bí mật, "
-        "chỉ hướng dẫn người dùng vào mục Cài đặt phù hợp, không nêu tên nhà cung cấp hay khóa. "
-        "QUY TẮC LINK: nếu người dùng gửi URL không phải link video hợp lệ thuộc danh sách hỗ trợ, "
-        "từ chối ngắn gọn; không mở, không phân tích, không chuyển tiếp URL đó tới công cụ hoặc dịch vụ ngoài. "
-        "Không được chấp nhận nhiều link trong cùng một yêu cầu. "
-        "AN TOÀN: từ chối ngắn gọn các yêu cầu nhạy cảm xâm phạm quyền riêng tư, đánh cắp thông tin, "
-        "vượt bảo vệ tài khoản, lừa đảo, xâm nhập trái phép, tạo mã độc hoặc gây hại. "
-        "Không yêu cầu người dùng cung cấp mật khẩu, mã OTP, cookie hoặc khóa bí mật trong chat. "
-        "Không để lộ tên nhà cung cấp API, dịch vụ tải, máy chủ, endpoint, mã HTTP, stack trace hoặc chi tiết nội bộ. "
-        "Không bịa rằng đã thực hiện hành động. Với link video, ứng dụng sẽ tự báo 'Tôi đã tìm thấy video' "
-        "khi đã tìm được nguồn; chỉ xác nhận đã tải và lưu khi ứng dụng xác nhận lưu thành công."
-    )
-    failures = []
-    request_gemini_key = gemini_api_key.strip() or GEMINI_API_KEY
-    request_openrouter_key = openrouter_api_key.strip() or OPENROUTER_API_KEY
-    request_deepseek_key = deepseek_api_key.strip() or DEEPSEEK_API_KEY
-    request_gemini_client = genai.Client(api_key=request_gemini_key) if request_gemini_key else None
-
-    # Primary model: Gemini. Optional OpenAI-compatible providers are tried
-    # automatically when their keys are configured in the hosting environment.
-    if request_gemini_client:
-        try:
-            conversation = []
-            for turn in req.history[-12:]:
-                role = "Chủ nhân" if turn.role == "user" else "Trợ lý MuChi"
-                if turn.role in ("user", "assistant"):
-                    conversation.append(f"{role}: {turn.content[:2000]}")
-            conversation.append(f"Chủ nhân: {message}")
-            response = request_gemini_client.models.generate_content(
-                model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-                contents="\n".join(conversation),
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=0.3,
-                ),
-            )
-            answer = getattr(response, "text", None)
-            if answer:
-                return {"type": "text", "message": safe_ai_answer(answer), "model_provider": "Gemini"}
-            failures.append("Gemini: empty response")
-        except Exception as exc:
-            log.warning("Gemini failed: %s", str(exc)[:240])
-            failures.append(f"Gemini: {str(exc)[:180]}")
-
-    compatible_providers = [
-        (
-            "OpenRouter",
-            request_openrouter_key,
-            "https://openrouter.ai/api/v1/chat/completions",
-            os.getenv("OPENROUTER_MODEL", "openrouter/free"),
-        ),
-        (
-            "DeepSeek",
-            request_deepseek_key,
-            "https://api.deepseek.com/chat/completions",
-            os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-        ),
-    ]
-    for provider_name, api_key, endpoint, model_name in compatible_providers:
-        if not api_key:
-            continue
-        try:
-            response = HTTP.post(
-                endpoint,
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={
-                    "model": model_name,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        *[
-                            {"role": turn.role, "content": turn.content[:2000]}
-                            for turn in req.history[-12:]
-                            if turn.role in ("user", "assistant")
-                        ],
-                        {"role": "user", "content": message},
-                    ],
-                    "temperature": 0.3,
-                },
-                timeout=(10, 60),
-            )
-            response.raise_for_status()
-            payload = response.json()
-            answer = payload["choices"][0]["message"]["content"]
-            if isinstance(answer, list):
-                answer = " ".join(
-                    part.get("text", "") for part in answer if isinstance(part, dict)
-                )
-            if answer and str(answer).strip():
-                return {"type": "text", "message": safe_ai_answer(str(answer)), "model_provider": provider_name}
-            failures.append(f"{provider_name}: empty response")
-        except Exception as exc:
-            log.warning("%s failed: %s", provider_name, str(exc)[:240])
-            failures.append(f"{provider_name}: {str(exc)[:180]}")
-
-    if not (request_gemini_key or request_openrouter_key or request_deepseek_key):
-        message_text = (
-            "Trợ lý AI chưa được kết nối. Chủ nhân hãy kiểm tra mục kết nối trợ lý trong Cài đặt. "
-            "Chức năng tải video vẫn có thể hoạt động độc lập."
-        )
-    else:
-        message_text = (
-            "Các mô hình AI hiện không phản hồi. Hệ thống đã thử các nhà cung cấp "
-            "được cấu hình; vui lòng thử lại sau. Chức năng tải video vẫn hoạt động độc lập."
-        )
-    return {"type": "error", "message": message_text, "provider_errors": failures}
-
-@app.get("/test", response_class=HTMLResponse)
-def web_chat_test():
-    return HTMLResponse("""<!doctype html><html lang="vi"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Video Server test</title>
-<style>body{font:16px system-ui;max-width:720px;margin:30px auto;padding:0 14px}input{width:100%;padding:12px;box-sizing:border-box}button{padding:12px;margin-top:10px}pre{white-space:pre-wrap;background:#eee;padding:12px;border-radius:8px}</style>
-</head><body><h2>Kiểm tra AI Video Server</h2><input id="msg" placeholder="Nhập câu hỏi hoặc dán link video"><button id="send">Gửi thử</button><pre id="out">Sẵn sàng</pre>
-<script>
-const input=document.getElementById('msg'),out=document.getElementById('out');
-document.getElementById('send').onclick=async()=>{const message=input.value.trim();if(!message)return;out.textContent='Đang xử lý...';try{const r=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message})});const d=await r.json();out.textContent=JSON.stringify(d,null,2)}catch(e){out.textContent='Lỗi kết nối: '+e.message}};
-</script></body></html>""")
