@@ -504,14 +504,17 @@ def _parse_douyin_profile_feed(status: int, payload) -> list[dict]:
         except (TypeError, ValueError):
             published_at = None
         description = item.get("desc") or ""
-        videos.append({
+        normalized = {
             "id": video_id,
             "url": item.get("share_url") or f"https://www.douyin.com/video/{video_id}",
             "title": description,
             "description": description,
             "published_at": published_at,
-            "thumbnail_url": _douyin_cover_url(item),
-        })
+        }
+        cover_url = _douyin_cover_url(item)
+        if cover_url:
+            normalized["thumbnail_url"] = cover_url
+        videos.append(normalized)
     return videos
 
 
