@@ -32,4 +32,6 @@ jobs:
           done
           curl --fail --silent http://127.0.0.1:10000/health
           docker exec ai-video-server-ci curl --fail --silent http://127.0.0.1:18081/health
+          docker exec ai-video-server-ci node --version
+          test "$(docker exec ai-video-server-ci curl --silent --output /dev/null --write-out '%{http_code}' -H 'Content-Type: application/json' -d '{"sec_uid":"invalid","cookie":"test"}' http://127.0.0.1:18081/scan)" = "400"
           docker exec ai-video-server-ci python -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True,args=['--no-sandbox','--disable-dev-shm-usage']); print('Chromium launch OK'); b.close(); p.stop()"
