@@ -18,11 +18,14 @@ type scanRequest struct {
 	SecUID string `json:"sec_uid"`
 	Cookie string `json:"cookie"`
 	MaxItems int `json:"max_items"`
+	Cursor string `json:"cursor"`
 }
 type scanResponse struct {
 	Status string `json:"status"`
 	Videos []any `json:"videos,omitempty"`
 	VideoCount int `json:"video_count"`
+	HasMore bool `json:"has_more"`
+	NextCursor string `json:"next_cursor,omitempty"`
 	Error string `json:"error,omitempty"`
 }
 
@@ -107,14 +110,19 @@ func scan(w http.ResponseWriter, r *http.Request) {
 	transport := argusHeaderTransport{base: baseTransport, uifid: uifid}
 	client, err := douyin.NewClient(req.Cookie, douyin.Options{Transport: transport})
 	if err != nil { write(w, http.StatusBadGateway, scanResponse{Status:"error", Error:"cannot initialize Douyin session"}); return }
-	posts, err := scanAllPosts(ctx, client, "https://www.douyin.com/user/"+req.SecUID, req.MaxItems)
+	cursor := strings.TrimSpace(req.Cursor)
+	if cursor == "" { cursor = "0" }
+	posts, nextCursor, hasMore, err := scanOnePage(ctx, client, "https://www.douyin.com/user/"+req.SecUID, cursor, req.MaxItems)
 	if err != nil {
 		log.Printf("Douyin scan failed sec_uid=%s err=%v", req.SecUID[:18], err)
 		write(w, http.StatusBadGateway, scanResponse{Status:"error", Error: safeError(err)})
 		return
 	}
 	if posts == nil { posts = []any{} }
-	write(w, http.StatusOK, scanResponse{Status:"success", Videos:posts, VideoCount:len(posts)})
+	write(w, http.StatusOK, scanResponse{
+		Status:"success", Videos:posts, VideoCount:len(posts),
+		HasMore:hasMore, NextCursor:nextCursor,
+	})
 }
 type douyinWorksClient interface {
 	GetUserWorkInfo(context.Context, string, string) (map[string]any, error)
