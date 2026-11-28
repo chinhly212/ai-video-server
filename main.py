@@ -595,6 +595,7 @@ def _scan_douyin_with_signed_go(req: DouyinProfileScanRequest) -> Optional[dict]
                 "sec_uid": req.sec_uid,
                 "cookie": req.cookie,
                 "max_items": req.max_items,
+                "cursor": req.cursor or "0",
             },
             timeout=(8, 420),
         )
@@ -651,9 +652,9 @@ def _scan_douyin_with_signed_go(req: DouyinProfileScanRequest) -> Optional[dict]
         "profile": _douyin_profile_from_aweme_items(raw_videos, req.sec_uid),
         "videos": videos,
         "video_count": len(videos),
-        "feed_responses": 0,
-        "has_more": len(videos) >= req.max_items,
-        "next_cursor": None,
+        "feed_responses": 1,
+        "has_more": bool(envelope.get("has_more")),
+        "next_cursor": envelope.get("next_cursor"),
         "source": "SIGNED_GO_CLIENT",
     }
 
@@ -927,6 +928,10 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
         request_cursor = _douyin_feed_request_cursor(response.url)
         if request_cursor in seen_feed_cursors:
             return
+        # The Android client requests one page at a time. Ignore earlier
+        # cursor responses while the browser scrolls to the requested page.
+        if request_cursor != (req.cursor or "0"):
+            return
         seen_feed_cursors.add(request_cursor)
         feed_responses += 1
         try:
@@ -1050,7 +1055,7 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
                 for _ in range(40):
                     if len(collected) >= req.max_items:
                         break
-                    if valid_feed_responses > 0 and not has_more:
+                    if valid_feed_responses > 0:
                         break
                     before_responses = feed_responses
                     page.mouse.wheel(0, 2600)
