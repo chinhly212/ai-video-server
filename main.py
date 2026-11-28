@@ -551,7 +551,7 @@ def _scan_douyin_with_dtk_api(req: DouyinProfileScanRequest) -> Optional[dict]:
     while has_more and len(collected) < req.max_items and page_count < 30:
         params = {
             "sec_user_id": sec_uid,
-            "count": min(20, req.max_items - len(collected)),
+            "count": 20,
             "wait": 90,
             "lang": "en",
         }
