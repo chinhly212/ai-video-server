@@ -653,7 +653,7 @@ def _scan_douyin_with_dtk_api(req: DouyinProfileScanRequest) -> Optional[dict]:
         return None
 
     sec_uid = req.sec_uid.strip()
-    if not re.fullmatch(r"MS4wLjAB[A-Za-z0-9_-]{10,240}", sec_uid):
+    if not re.fullmatch(r"[A-Za-z0-9._~-]{12,256}", sec_uid):
         raise HTTPException(status_code=400, detail="Mã sec_uid Douyin không hợp lệ.")
 
     endpoint = base_url + "/api/v1/douyin/user/posts"
@@ -841,7 +841,7 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
     from playwright.sync_api import sync_playwright
 
     sec_uid = req.sec_uid.strip()
-    if not re.fullmatch(r"MS4wLjAB[A-Za-z0-9_-]{10,240}", sec_uid):
+    if not re.fullmatch(r"[A-Za-z0-9._~-]{12,256}", sec_uid):
         raise HTTPException(status_code=400, detail="Mã sec_uid Douyin không hợp lệ.")
 
     user_agent = (
