@@ -52,7 +52,11 @@ func scan(w http.ResponseWriter, r *http.Request) {
 	if posts == nil { posts = []any{} }
 	write(w, http.StatusOK, scanResponse{Status:"success", Videos:posts, VideoCount:len(posts)})
 }
-func scanAllPosts(ctx context.Context, client *douyin.Client, profileURL string, limit int) ([]any, error) {
+type douyinWorksClient interface {
+	GetUserWorkInfo(context.Context, string, string) (map[string]any, error)
+}
+
+func scanAllPosts(ctx context.Context, client douyinWorksClient, profileURL string, limit int) ([]any, error) {
 	const pageSize = 18
 	maxPages := (limit + pageSize - 1) / pageSize + 2
 	cursor := "0"
