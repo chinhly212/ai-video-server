@@ -526,6 +526,150 @@ def _activate_douyin_posts_tab(page) -> Optional[str]:
     return None
 
 
+def _scan_douyin_with_dtk_api(req: DouyinProfileScanRequest) -> Optional[dict]:
+    """Use a separately hosted DTK API instance when configured.
+
+    The DTK instance owns its own logged-in identity pool. The mobile cookie is
+    deliberately not forwarded to this third-party service; operators import
+    and manage the session in DTK itself.
+    """
+    base_url = os.getenv("DTK_API_BASE_URL", "").strip().rstrip("/")
+    api_key = os.getenv("DTK_API_KEY", "").strip()
+    if not base_url or not api_key:
+        return None
+
+    sec_uid = req.sec_uid.strip()
+    if not re.fullmatch(r"MS4wLjAB[A-Za-z0-9_-]{10,240}", sec_uid):
+        raise HTTPException(status_code=400, detail="Mã sec_uid Douyin không hợp lệ.")
+
+    endpoint = base_url + "/api/v1/douyin/user/posts"
+    collected: dict[str, dict] = {}
+    cursor: Optional[str] = None
+    page_count = 0
+    has_more = True
+
+    while has_more and len(collected) < req.max_items and page_count < 30:
+        params = {
+            "sec_user_id": sec_uid,
+            "count": min(20, req.max_items - len(collected)),
+            "wait": 90,
+            "lang": "en",
+        }
+        if cursor:
+            params["cursor"] = cursor
+
+        try:
+            response = HTTP.get(
+                endpoint,
+                params=params,
+                headers={
+                    "X-API-Key": api_key,
+                    "Accept": "application/json",
+                    "User-Agent": "MuChi-Douyin-Bridge/1.0",
+                },
+                timeout=(12, 110),
+            )
+            response.raise_for_status()
+            envelope = response.json()
+        except requests.RequestException as exc:
+            log.warning("DTK Douyin bridge request failed: %s", type(exc).__name__)
+            raise HTTPException(
+                status_code=502,
+                detail="Dịch vụ quét Douyin chưa kết nối được. Hãy kiểm tra máy chủ API Douyin.",
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Dịch vụ quét Douyin trả về dữ liệu JSON không hợp lệ.",
+            ) from exc
+
+        if not isinstance(envelope, dict) or envelope.get("success") is not True:
+            error = envelope.get("error") if isinstance(envelope, dict) else None
+            code = str(error.get("code", "")) if isinstance(error, dict) else ""
+            message = str(error.get("message", "")) if isinstance(error, dict) else ""
+            log.warning("DTK Douyin bridge rejected page: code=%s", code[:80])
+            if code == "IDENTITY_LOGIN_REQUIRED":
+                detail = "Máy chủ quét Douyin chưa có phiên đăng nhập hợp lệ. Cần nhập phiên Douyin vào bộ quản lý tài khoản của máy chủ API."
+            elif code in ("UPSTREAM_RISK_CONTROL", "UPSTREAM_CHANGED"):
+                detail = "Douyin đang giới hạn hoặc thay đổi phản hồi. Hãy chờ rồi quét lại."
+            else:
+                detail = "Máy chủ API Douyin không lấy được danh sách video."
+            if message:
+                log.info("DTK Douyin bridge message: %s", message[:240])
+            raise HTTPException(status_code=502, detail=detail)
+
+        meta = envelope.get("meta") if isinstance(envelope.get("meta"), dict) else {}
+        if meta.get("guest_fallback") is True:
+            raise HTTPException(
+                status_code=503,
+                detail="Máy chủ API đang dùng phiên khách nên danh sách có thể thiếu video mới. Hãy nhập phiên đăng nhập Douyin vào máy chủ API rồi quét lại.",
+            )
+
+        page = envelope.get("data")
+        if not isinstance(page, dict) or not isinstance(page.get("items"), list):
+            raise HTTPException(
+                status_code=502,
+                detail="Máy chủ API Douyin trả về cấu trúc danh sách không hợp lệ.",
+            )
+
+        page_count += 1
+        for item in page["items"]:
+            if not isinstance(item, dict):
+                continue
+            video_id = str(item.get("content_id") or "").strip()
+            if not video_id:
+                continue
+            created_at = item.get("created_at")
+            published_at = None
+            if isinstance(created_at, (int, float)):
+                published_at = int(created_at * 1000)
+            elif isinstance(created_at, str) and created_at:
+                try:
+                    from datetime import datetime
+                    parsed = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    published_at = int(parsed.timestamp() * 1000)
+                except (TypeError, ValueError, OverflowError):
+                    published_at = None
+            if published_at is not None and published_at < req.since_timestamp:
+                continue
+            description = str(item.get("description") or item.get("title") or "")
+            collected.setdefault(video_id, {
+                "id": video_id,
+                "url": str(item.get("web_url") or f"https://www.douyin.com/video/{video_id}"),
+                "title": str(item.get("title") or description),
+                "description": description,
+                "published_at": published_at,
+            })
+            if len(collected) >= req.max_items:
+                break
+
+        has_more = bool(page.get("has_more"))
+        next_cursor = page.get("cursor")
+        if not has_more or not next_cursor or str(next_cursor) == cursor:
+            has_more = False
+            cursor = None
+        else:
+            cursor = str(next_cursor)
+            time.sleep(0.8)
+
+    videos = sorted(
+        collected.values(),
+        key=lambda item: item.get("published_at") or 0,
+        reverse=True,
+    )
+    return {
+        "status": "success",
+        "platform": "DOUYIN",
+        "profile_id": sec_uid,
+        "videos": videos[:req.max_items],
+        "video_count": min(len(videos), req.max_items),
+        "feed_responses": page_count,
+        "has_more": has_more,
+        "next_cursor": cursor if has_more else None,
+        "source": "DTK_API",
+    }
+
+
 @app.post("/douyin/profile/videos")
 def douyin_profile_videos(req: DouyinProfileScanRequest):
     """Read profile-post data from the real Douyin page in Chromium.
@@ -533,6 +677,13 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
     The page itself creates Douyin's changing request signatures. We observe its
     own profile-feed responses instead of passing a profile URL to yt-dlp.
     """
+    # Prefer the separately hosted signing/identity engine when configured.
+    # Keep the existing Chromium observer as a fallback for deployments that
+    # have not provisioned that service yet.
+    dtk_result = _scan_douyin_with_dtk_api(req)
+    if dtk_result is not None:
+        return dtk_result
+
     from playwright.sync_api import sync_playwright
 
     sec_uid = req.sec_uid.strip()
