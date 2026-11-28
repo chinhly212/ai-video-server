@@ -37,7 +37,8 @@ func scan(w http.ResponseWriter, r *http.Request) {
 	req.SecUID = strings.TrimSpace(req.SecUID)
 	req.Cookie = strings.TrimSpace(req.Cookie)
 	if !secUIDPattern.MatchString(req.SecUID) || req.Cookie == "" { http.Error(w, "sec_uid or cookie invalid", http.StatusBadRequest); return }
-	if req.MaxItems < 1 || req.MaxItems > 600 { req.MaxItems = 600 }
+	if req.MaxItems < 1 { req.MaxItems = 600 }
+	if req.MaxItems > 600 { req.MaxItems = 600 }
 	ctx, cancel := context.WithTimeout(r.Context(), 7*time.Minute)
 	defer cancel()
 	client, err := douyin.NewClient(req.Cookie, douyin.Options{})
