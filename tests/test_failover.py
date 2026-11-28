@@ -458,3 +458,40 @@ def test_douyin_profile_metadata_falls_back_to_sec_uid_when_no_author():
     assert main._douyin_profile_from_aweme_items([{"aweme_id": "123"}], "MS4wLjABfallback") == {
         "sec_uid": "MS4wLjABfallback"
     }
+
+
+
+def test_douyin_signed_scanner_falls_back_on_non_json_response(monkeypatch):
+    class FakeResponse:
+        status_code = 403
+        headers = {"content-type": "text/html"}
+        text = "<html>Blocked by upstream security</html>"
+        def json(self):
+            raise ValueError("not JSON")
+
+    monkeypatch.setattr(main.requests, "post", lambda *args, **kwargs: FakeResponse())
+    request = main.DouyinProfileScanRequest(
+        sec_uid="MS4wLjAB1234567890",
+        cookie="sessionid=test; UIFID=test",
+        since_timestamp=0,
+        max_items=10,
+    )
+    assert main._scan_douyin_with_signed_go(request) is None
+
+
+def test_douyin_signed_scanner_falls_back_on_unexpected_json_shape(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        text = "[]"
+        def json(self):
+            return []
+
+    monkeypatch.setattr(main.requests, "post", lambda *args, **kwargs: FakeResponse())
+    request = main.DouyinProfileScanRequest(
+        sec_uid="MS4wLjAB1234567890",
+        cookie="sessionid=test; UIFID=test",
+        since_timestamp=0,
+        max_items=10,
+    )
+    assert main._scan_douyin_with_signed_go(request) is None
