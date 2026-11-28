@@ -499,7 +499,7 @@ def _open_douyin_profile_page(page, profile_url: str) -> bool:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
     try:
-        page.goto(profile_url, wait_until="commit", timeout=45000)
+        page.goto(profile_url, wait_until="commit", timeout=25000)
         return True
     except PlaywrightTimeoutError:
         log.warning(
@@ -615,7 +615,7 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
             try:
                 profile_url = "https://www.douyin.com/user/" + sec_uid
                 navigation_committed = _open_douyin_profile_page(page, profile_url)
-                page.wait_for_timeout(5000)
+                page.wait_for_timeout(3000)
                 try:
                     page_text = (page.locator("body").inner_text(timeout=1500) or "").lower()
                 except Exception as page_text_error:
@@ -641,11 +641,11 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
                 )
                 stagnant_rounds = 0
                 previous_count = 0
-                for _ in range(20):
+                for _ in range(12):
                     if valid_feed_responses > 0 or len(collected) >= req.max_items:
                         break
                     page.mouse.wheel(0, 2400)
-                    page.wait_for_timeout(1500)
+                    page.wait_for_timeout(1000)
                     current_count = len(collected)
                     stagnant_rounds = stagnant_rounds + 1 if current_count == previous_count else 0
                     previous_count = current_count
