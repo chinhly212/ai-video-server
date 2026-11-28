@@ -114,3 +114,21 @@ func TestScanAllPostsReturnsUpstreamError(t *testing.T) {
 		t.Fatal("expected upstream error")
 	}
 }
+
+func TestNormalizeDouyinCookiePromotesTemporaryUIFID(t *testing.T) {
+	got := normalizeDouyinCookie("sessionid=abc; UIFID_TEMP=temp-issued; ttwid=xyz")
+	want := "sessionid=abc; UIFID_TEMP=temp-issued; ttwid=xyz; UIFID=temp-issued"
+	if got != want { t.Fatalf("normalized cookie = %q, want %q", got, want) }
+}
+
+func TestNormalizeDouyinCookiePreservesRealUIFID(t *testing.T) {
+	got := normalizeDouyinCookie("sessionid=abc; uIfId=real-issued; UIFID_TEMP=temp-issued")
+	want := "sessionid=abc; UIFID=real-issued; UIFID_TEMP=temp-issued"
+	if got != want { t.Fatalf("normalized cookie = %q, want %q", got, want) }
+}
+
+func TestNormalizeDouyinCookieDoesNotInventUIFID(t *testing.T) {
+	got := normalizeDouyinCookie("sessionid=abc; ttwid=xyz")
+	want := "sessionid=abc; ttwid=xyz"
+	if got != want { t.Fatalf("normalized cookie = %q, want %q", got, want) }
+}
