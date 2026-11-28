@@ -81,7 +81,90 @@ func extractDouyinUIFID(raw string) string {
 	return temporary
 }
 
-var secUIDPattern = regexp.MustCompile(`^MS4wLjAB[A-Za-z0-9_-]{10,240}$`)
+var secUIDPattern = regexp.MustCompile(`^[A-Za-z0-9._~-]{12,256}package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/yunsur/douyin-mcp/douyin"
+)
+
+type scanRequest struct {
+	SecUID string `json:"sec_uid"`
+	Cookie string `json:"cookie"`
+	MaxItems int `json:"max_items"`
+}
+type scanResponse struct {
+	Status string `json:"status"`
+	Videos []any `json:"videos,omitempty"`
+	VideoCount int `json:"video_count"`
+	Error string `json:"error,omitempty"`
+}
+
+type argusHeaderTransport struct { base douyin.Transport; uifid string }
+
+func (t argusHeaderTransport) Do(ctx context.Context, method, rawURL string, headers douyin.Headers, cookieHeader string, body []byte) (*douyin.Response, error) {
+	if strings.Contains(strings.ToLower(rawURL), "douyin.com") && t.uifid != "" {
+		headers.Set("uifid", t.uifid)
+	}
+	return t.base.Do(ctx, method, rawURL, headers, cookieHeader, body)
+}
+func (t argusHeaderTransport) Get(ctx context.Context, rawURL string, headers douyin.Headers, cookieHeader string) (*douyin.Response, error) {
+	return t.Do(ctx, http.MethodGet, rawURL, headers, cookieHeader, nil)
+}
+func (t argusHeaderTransport) PostJSON(ctx context.Context, rawURL string, headers douyin.Headers, cookieHeader, contentType string, body []byte) (*douyin.Response, error) {
+	if contentType != "" { headers.Set("content-type", contentType) }
+	return t.Do(ctx, http.MethodPost, rawURL, headers, cookieHeader, body)
+}
+
+func normalizeDouyinCookie(raw string) string {
+	parts := strings.Split(raw, ";")
+	out := make([]string, 0, len(parts)+1)
+	tempUIFID := ""
+	hasUIFID := false
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" { continue }
+		name, value, found := strings.Cut(part, "=")
+		name = strings.TrimSpace(name)
+		if found && strings.EqualFold(name, "UIFID") {
+			hasUIFID = true
+			out = append(out, "UIFID="+strings.TrimSpace(value))
+			continue
+		}
+		if found && strings.EqualFold(name, "UIFID_TEMP") {
+			tempUIFID = strings.TrimSpace(value)
+			out = append(out, "UIFID_TEMP="+tempUIFID)
+			continue
+		}
+		out = append(out, part)
+	}
+	if !hasUIFID && tempUIFID != "" { out = append(out, "UIFID="+tempUIFID) }
+	return strings.Join(out, "; ")
+}
+
+func extractDouyinUIFID(raw string) string {
+	temporary := ""
+	for _, part := range strings.Split(raw, ";") {
+		name, value, found := strings.Cut(strings.TrimSpace(part), "=")
+		if !found { continue }
+		name = strings.TrimSpace(name)
+		value = strings.TrimSpace(value)
+		if strings.EqualFold(name, "UIFID") && value != "" { return value }
+		if strings.EqualFold(name, "UIFID_TEMP") && value != "" { temporary = value }
+	}
+	return temporary
+}
+
+var secUIDPattern = )
 
 func scan(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost { http.Error(w, "method not allowed", http.StatusMethodNotAllowed); return }
