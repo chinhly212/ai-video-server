@@ -462,6 +462,12 @@ def _parse_douyin_profile_feed(status: int, payload) -> list[dict]:
     return videos
 
 
+def _is_douyin_profile_feed_path(response_path: str) -> bool:
+    """Recognize Douyin profile-post endpoint variants without matching unrelated aweme APIs."""
+    normalized = response_path.rstrip("/").lower()
+    return "aweme" in normalized and normalized.endswith("/post")
+
+
 def _douyin_feed_request_cursor(response_url: str) -> str:
     values = parse_qs(urlparse(response_url).query).get("max_cursor") or ["0"]
     return str(values[0])
@@ -535,19 +541,33 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
     feed_responses = 0
     valid_feed_responses = 0
     response_errors = []
+    observed_aweme_responses = []
+    page_diagnostics = {
+        "navigation_committed": None,
+        "final_path": "",
+        "login_hint": False,
+        "verify_hint": False,
+    }
     next_cursor = None
     has_more = False
 
     def capture_profile_feed(response):
         nonlocal feed_responses, valid_feed_responses, next_cursor, has_more
         response_path = urlparse(response.url).path
-        if "aweme" not in response_path:
+        if "aweme" not in response_path.lower():
             return
+        content_type = response.headers.get("content-type", "")
+        if len(observed_aweme_responses) < 8:
+            observed_aweme_responses.append({
+                "path": response_path[:180],
+                "status": response.status,
+                "content_type": content_type[:80],
+            })
         log.info(
             "Douyin profile response path=%s status=%s content_type=%s",
-            response_path, response.status, response.headers.get("content-type", "")
+            response_path, response.status, content_type
         )
-        if "/aweme/v1/web/aweme/post/" not in response_path:
+        if not _is_douyin_profile_feed_path(response_path):
             return
         request_cursor = _douyin_feed_request_cursor(response.url)
         if request_cursor != str(req.cursor):
@@ -605,13 +625,19 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
                         "Douyin profile diagnostic text unavailable: %s",
                         type(page_text_error).__name__,
                     )
+                page_diagnostics.update({
+                    "navigation_committed": navigation_committed,
+                    "final_path": urlparse(page.url).path[:180],
+                    "login_hint": any(word in page_text for word in ("登录", "login", "扫码")),
+                    "verify_hint": any(word in page_text for word in ("验证", "验证码", "captcha", "安全验证")),
+                })
                 log.info(
                     "Douyin profile page state navigation_committed=%s title=%r final_url_path=%s login_hint=%s verify_hint=%s",
                     navigation_committed,
                     page.title(),
-                    urlparse(page.url).path,
-                    any(word in page_text for word in ("登录", "login", "扫码")),
-                    any(word in page_text for word in ("验证", "验证码", "captcha", "安全验证")),
+                    page_diagnostics["final_path"],
+                    page_diagnostics["login_hint"],
+                    page_diagnostics["verify_hint"],
                 )
                 stagnant_rounds = 0
                 previous_count = 0
@@ -640,11 +666,28 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
     )
 
     if valid_feed_responses == 0:
-        detail = "Douyin không trả về phản hồi danh sách video hợp lệ. Hãy kiểm tra phiên đăng nhập hoặc thử lại sau."
-        if feed_responses:
-            detail += " Máy chủ đã nhận phản hồi nhưng dữ liệu bị từ chối hoặc không đúng định dạng."
-        if response_errors:
-            detail += " Một số phản hồi bị lỗi khi đọc."
+        detail = "Douyin không trả về phản hồi danh sách video hợp lệ."
+        if not cookie_pairs:
+            detail += " Máy chủ nhận được cookie trống; hãy đăng nhập Douyin và lưu lại phiên."
+        elif page_diagnostics["login_hint"]:
+            detail += " Trang hồ sơ đang yêu cầu đăng nhập; hãy đăng nhập lại và lưu phiên."
+        elif page_diagnostics["verify_hint"]:
+            detail += " Douyin đang hiển thị bước xác minh/captcha; hãy thử lại sau."
+        elif feed_responses:
+            detail += " Đã bắt được API bài đăng nhưng dữ liệu trả về không hợp lệ."
+        else:
+            detail += " Không bắt được API danh sách bài đăng từ trang hồ sơ."
+        detail += (
+            f" Chẩn đoán: đường dẫn cuối={page_diagnostics['final_path'] or 'không rõ'};"
+            f" phản hồi aweme={len(observed_aweme_responses)};"
+            f" phản hồi khớp={feed_responses}; lỗi đọc={len(response_errors)}."
+        )
+        if observed_aweme_responses:
+            paths = ", ".join(
+                f"{item['path']} [HTTP {item['status']}]"
+                for item in observed_aweme_responses[:5]
+            )
+            detail += f" API quan sát được: {paths}."
         raise HTTPException(status_code=502, detail=detail)
 
     return {
