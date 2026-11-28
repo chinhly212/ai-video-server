@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-/app/douyin-scanner &
+/usr/local/bin/douyin-scanner &
 SCANNER_PID=$!
 cleanup() {
   kill "$SCANNER_PID" 2>/dev/null || true
