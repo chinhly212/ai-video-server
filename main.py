@@ -637,6 +637,10 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
                 context.add_cookies(cookie_pairs)
             page = context.new_page()
             page.on("response", capture_profile_feed)
+            page.on("request", lambda request: observed_aweme_requests.append({
+                "method": request.method,
+                "path": urlparse(request.url).path[:180],
+            }) if "aweme" in urlparse(request.url).path.lower() and len(observed_aweme_requests) < 8 else None)
             page.on("requestfailed", lambda request: failed_requests.append({
                 "path": urlparse(request.url).path[:140],
                 "failure": str(request.failure or "request failed")[:100],
