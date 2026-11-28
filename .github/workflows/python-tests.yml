@@ -20,3 +20,15 @@ jobs:
       - run: pytest -q
       - name: Build production Docker image
         run: docker build --tag ai-video-server:ci .
+      - name: Smoke test API and Chromium inside production container
+        run: |
+          docker run -d --name ai-video-server-ci -p 10000:10000 ai-video-server:ci
+          trap 'docker logs ai-video-server-ci; docker rm -f ai-video-server-ci' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:10000/health; then
+              break
+            fi
+            sleep 2
+          done
+          curl --fail --silent http://127.0.0.1:10000/health
+          docker exec ai-video-server-ci python -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True,args=['--no-sandbox','--disable-dev-shm-usage']); print('Chromium launch OK'); b.close(); p.stop()"
