@@ -298,6 +298,31 @@ def test_douyin_profile_navigation_timeout_is_recoverable():
     ) is False
 
 
+def test_douyin_posts_tab_is_activated_before_feed_scrolling():
+    calls = []
+
+    class FakeLocator:
+        first = None
+        def __init__(self):
+            self.first = self
+        def count(self):
+            return 1
+        def is_visible(self):
+            return True
+        def click(self, **kwargs):
+            calls.append(kwargs)
+
+    class FakePage:
+        def get_by_text(self, label, exact=False):
+            calls.append((label, exact))
+            return FakeLocator()
+        def wait_for_timeout(self, ms):
+            calls.append(ms)
+
+    assert main._activate_douyin_posts_tab(FakePage()) == "作品"
+    assert calls == [("作品", True), {"timeout": 2500}, 1800]
+
+
 def test_douyin_feed_parser_normalizes_video_entries():
     payload = {"aweme_list": [{
         "aweme_id": "12345",
