@@ -856,7 +856,7 @@ def douyin_profile_videos(req: DouyinProfileScanRequest):
     has_more = False
 
     def capture_profile_feed(response):
-        nonlocal feed_responses, valid_feed_responses, next_cursor, has_more
+        nonlocal feed_responses, valid_feed_responses, next_cursor, has_more, profile_info
         response_path = urlparse(response.url).path
         if "aweme" not in response_path.lower():
             return
