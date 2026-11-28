@@ -427,3 +427,34 @@ def test_kuaishou_scan_request_is_one_page_per_call():
     )
     assert request.max_pages == 1
     assert request.cursor == "pcursor-next"
+
+
+def test_douyin_profile_metadata_is_extracted_from_aweme_author():
+    raw_items = [{
+        "aweme_id": "123",
+        "author": {
+            "sec_uid": "MS4wLjABcreator",
+            "nickname": "Creator Name",
+            "unique_id": "creator_id",
+            "signature": "Creator bio",
+            "avatar_larger": {"url_list": ["https://cdn.example/avatar.jpeg"]},
+            "follower_count": 321,
+            "following_count": 45,
+            "aweme_count": 67,
+        },
+    }]
+    profile = main._douyin_profile_from_aweme_items(raw_items, "MS4wLjABfallback")
+    assert profile["sec_uid"] == "MS4wLjABcreator"
+    assert profile["nickname"] == "Creator Name"
+    assert profile["unique_id"] == "creator_id"
+    assert profile["signature"] == "Creator bio"
+    assert profile["avatar_url"] == "https://cdn.example/avatar.jpeg"
+    assert profile["follower_count"] == 321
+    assert profile["following_count"] == 45
+    assert profile["aweme_count"] == 67
+
+
+def test_douyin_profile_metadata_falls_back_to_sec_uid_when_no_author():
+    assert main._douyin_profile_from_aweme_items([{"aweme_id": "123"}], "MS4wLjABfallback") == {
+        "sec_uid": "MS4wLjABfallback"
+    }
