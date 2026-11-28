@@ -1111,7 +1111,6 @@ def download_via_ytdlp(source_url: str):
         )
     except Exception:
         shutil.rmtree(temp_dir, ignore_errors=True)
-        shutil.rmtree(temp_dir, ignore_errors=True)
         raise
 
 
